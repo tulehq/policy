@@ -189,7 +189,7 @@ func (s *statement) trusts(action, caller string, vars bool, rc *requestContext)
 	if s.principal == nil || s.hasResource || !s.matchesAction(action) {
 		return matchNone, false
 	}
-	kind := s.principal.matches(caller, rc)
+	kind := s.principal.matches(caller)
 	if (kind != matchNone) == s.notPrincipal || !s.conditionsHold(vars, rc) {
 		return matchNone, false
 	}

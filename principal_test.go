@@ -100,6 +100,15 @@ var trustCases = []struct { //nolint:govet // fieldalignment: field order reads 
 		"arn:aws:sts::123456789012:assumed-role/deploy/s",
 		ctx("aws:PrincipalArn", "arn:aws:iam::123456789012:role/team/deploy"), true,
 	},
+	// The context does not identify the caller: a user claiming a role's
+	// ARN as aws:PrincipalArn is still the user.
+	{
+		"aws:PrincipalArn in context is not identity",
+		`{"AWS":"arn:aws:iam::123456789012:role/admin"}`,
+		"arn:aws:iam::123456789012:user/alice",
+		ctx("aws:PrincipalArn", "arn:aws:iam::123456789012:role/admin"),
+		false,
+	},
 	{
 		"role does not match a user", `{"AWS":"arn:aws:iam::123456789012:role/deploy"}`,
 		"arn:aws:iam::123456789012:user/deploy", nil, false,

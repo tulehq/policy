@@ -119,32 +119,32 @@ const (
 //     ("When they use those session credentials to perform operations in
 //     AWS, they become a role session principal."). A role's name is unique
 //     in its account whatever its path, so the role is identified by
-//     partition, account and name. It also matches a caller whose context
-//     carries that role ARN as aws:PrincipalArn.
+//     partition, account and name. The request context plays no part:
+//     a context key such as aws:PrincipalArn does not identify the caller.
 //   - Any other value, such as a user, assumed-role session or federated
 //     user ARN, or a Service, Federated or CanonicalUser value, matches a
 //     caller with exactly that identifier. "In a Principal element, the user
 //     name part of the Amazon Resource Name (ARN) is case sensitive."
-func (p *principals) matches(caller string, rc *requestContext) matchKind {
+func (p *principals) matches(caller string) matchKind {
 	if p.all {
 		return matchDirect
 	}
 	best := matchNone
 	for typ, ids := range p.byType {
 		for _, id := range ids {
-			best = max(best, principalMatch(typ, id, caller, rc))
+			best = max(best, principalMatch(typ, id, caller))
 		}
 	}
 	return best
 }
 
-func principalMatch(typ, id, caller string, rc *requestContext) matchKind {
+func principalMatch(typ, id, caller string) matchKind {
 	switch {
 	case typ == "AWS" && (isAccountID(id) || isRootARN(id)):
-		if id == caller || awsPrincipalMatches(id, caller, rc) {
+		if id == caller || awsPrincipalMatches(id, caller) {
 			return matchAccount
 		}
-	case id == caller || typ == "AWS" && awsPrincipalMatches(id, caller, rc):
+	case id == caller || typ == "AWS" && awsPrincipalMatches(id, caller):
 		return matchDirect
 	}
 	return matchNone
@@ -155,7 +155,7 @@ func isRootARN(id string) bool {
 	return ok && a.isRoot()
 }
 
-func awsPrincipalMatches(id, caller string, rc *requestContext) bool {
+func awsPrincipalMatches(id, caller string) bool {
 	c, callerIsARN := parseARN(caller)
 	if isAccountID(id) {
 		return callerIsARN && c.account == id
@@ -167,19 +167,17 @@ func awsPrincipalMatches(id, caller string, rc *requestContext) bool {
 	case a.isRoot():
 		return c.partition == a.partition && c.account == a.account
 	default:
-		return roleMatches(a, id, c, rc)
+		return roleMatches(a, c)
 	}
 }
 
-// roleMatches reports whether the role ARN a (written id) names the caller
-// c: one of its sessions, or a caller whose aws:PrincipalArn is id.
-func roleMatches(a arn, id string, c arn, rc *requestContext) bool {
+// roleMatches reports whether the role ARN a names the caller c, one of
+// its sessions. Only the caller's own ARN identifies it: a request context
+// key such as aws:PrincipalArn is the caller's claim, not its identity.
+func roleMatches(a, c arn) bool {
 	role, ok := a.roleName()
 	if !ok {
 		return false
-	}
-	if pa, present := rc.get("aws:PrincipalArn"); present && len(pa) == 1 && pa[0] == id {
-		return true
 	}
 	session, ok := c.assumedRole()
 	return ok && session == role && c.partition == a.partition && c.account == a.account

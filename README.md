@@ -181,11 +181,13 @@ the root user, `aws:userid` are derived from `Request.Principal` when
 `..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic
 to statements whose action matches, whose `Principal` names the caller (or
 whose `NotPrincipal` does not), and whose conditions hold; a statement with
-no `Principal` or with a `Resource` never applies. `"*"` and `{"AWS":"*"}` match anyone. An account ID or
+no `Principal` or with a `Resource` never applies. `"*"` and `{"AWS":"*"}`
+match anyone. An account ID or
 `arn:...:iam::ACCOUNT:root` matches every principal of the account. A role
 ARN matches the role's sessions (`arn:...:sts::ACCOUNT:assumed-role/NAME/...`,
-by partition, account and name, so a role path does not matter) and a caller
-whose `aws:PrincipalArn` is that ARN. Other values (user, session,
+by partition, account and name, so a role path does not matter). Only the
+`principalARN` argument identifies the caller; the context, including
+`aws:PrincipalArn`, plays no part in matching principals. Other values (user, session,
 federated-user ARNs, `Service`, `Federated`, `CanonicalUser`) match exactly.
 Partial wildcards in principals are rejected.
 
