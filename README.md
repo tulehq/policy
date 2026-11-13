@@ -189,7 +189,10 @@ is `Allow` or `Deny` exactly. Each statement has `Action` or `NotAction`, and
 `Resource` or `NotResource` unless it has a `Principal` or `NotPrincipal`
 (a trust policy names no resource). An action is `*` or `vendor:name`. A
 resource is `*` or an ARN with a vendor without wildcards. A `Sid` is
-alphanumeric and unique in the policy. `NotPrincipal` requires `Deny`.
+unique in the policy, and alphanumeric in an identity or trust policy; in a
+resource-based policy it may be any string, since its service sets the
+rule (an SQS AddPermission Label or a Lambda StatementId takes hyphens and
+underscores). `NotPrincipal` requires `Deny`.
 Condition values are strings, numbers or booleans, or non-empty arrays of
 them, valid for their operator (see Conditions).
 

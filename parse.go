@@ -362,7 +362,13 @@ func parseStatement(obj object, vars bool, k docKind) (statement, error) {
 
 // parseSid: "For IAM policies, basic alphanumeric characters (A-Z,a-z,0-9)
 // are the only allowed characters in the Sid value." ("Grammar of the IAM
-// JSON policy language", sid_string).
+// JSON policy language", sid_string). That rule is IAM's: a resource-based
+// policy belongs to its service, whose Sids may be wider, such as the
+// hyphens and underscores of an SQS AddPermission Label or a Lambda
+// StatementId; the IAM User Guide's Sid element page leaves Sid rules for
+// resource-based policies to services such as Amazon SQS and Amazon SNS.
+// So a resource-based policy's Sid may be any string, unique within the
+// policy, and the service applies its own rule.
 func parseSid(s *statement, r rawStatement) error {
 	v, ok := r.get("Sid")
 	if !ok {
@@ -372,13 +378,22 @@ func parseSid(s *statement, r rawStatement) error {
 	if !ok {
 		return parseErr(msgSyntax)
 	}
-	for _, c := range []byte(sid) {
-		if !isAlnum(c) {
-			return parseErr(msgSidChars)
-		}
+	if r.kind != kindResource && !isAlnumString(sid) {
+		return parseErr(msgSidChars)
 	}
 	s.sid = sid
 	return nil
+}
+
+// isAlnumString reports whether s holds only the characters IAM allows in
+// a Sid, A-Z, a-z and 0-9.
+func isAlnumString(s string) bool {
+	for _, c := range []byte(s) {
+		if !isAlnum(c) {
+			return false
+		}
+	}
+	return true
 }
 
 func isAlnum(c byte) bool {
