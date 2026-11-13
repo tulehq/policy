@@ -266,3 +266,26 @@ func TestSessionNeedsName(t *testing.T) {
 		t.Error("a session of the role did not match")
 	}
 }
+
+// A role session's aws:PrincipalArn is its role ARN with the path. The
+// caller passes it, and a path-scoped Deny then applies; the fallback
+// derived from the session ARN has no path.
+func TestSuppliedPrincipalArnWithPath(t *testing.T) {
+	deny := condPolicy(
+		"Deny",
+		`{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::111122223333:role/restricted/*"}}`,
+	)
+	ps := []*Policy{mustParse(t, allowAll), mustParse(t, deny)}
+	r := Request{
+		Action:    "s3:GetObject",
+		Resource:  "x",
+		Principal: "arn:aws:sts::111122223333:assumed-role/ops/s",
+	}
+	if got := Evaluate(r, ps...); got.Decision != Allow {
+		t.Errorf("derived, no path: %+v, want Allow", got)
+	}
+	r.Context = ctx("aws:PrincipalArn", "arn:aws:iam::111122223333:role/restricted/ops")
+	if got := Evaluate(r, ps...); got.Decision != ExplicitDeny {
+		t.Errorf("supplied with path: %+v, want ExplicitDeny", got)
+	}
+}

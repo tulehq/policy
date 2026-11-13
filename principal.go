@@ -142,7 +142,11 @@ const (
 )
 
 // matches reports how the element names the caller, the closest match of
-// all its values. Values match as follows:
+// all its values. Principals match by ARN, not by the unique ID that IAM
+// binds a user or role ARN to when it saves a trust policy, so a recreated
+// principal with the same name matches; a caller needing AWS's recreate
+// semantics binds ARNs to unique IDs itself. Names in ARNs match
+// case-sensitively. Values match as follows:
 //
 //   - "*" matches every caller.
 //   - An AWS account ID, or the account's root ARN

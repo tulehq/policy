@@ -219,7 +219,13 @@ that rule is the caller's.
 
 **Matching cost.** Wildcard patterns are matched by simulating the pattern
 as an automaton, in O(pattern × input) time and O(pattern) space whatever
-the number of wildcards; no input backtracks exponentially.
+the number of wildcards; no input backtracks exponentially. A condition
+compares every request value with every policy value, so `Evaluate`'s cost
+grows with the context's size times the policies' (2000 request values of
+200 characters against 2000 `StringLike` patterns took about 11 seconds in
+testing). Services must cap the
+request context they pass, in number of keys and values and in value
+length, as they cap policy size.
 
 ## Parse error messages
 
@@ -270,9 +276,26 @@ text for those faults is not documented.
   their values.
 - An all-digits date is epoch seconds, so the W3C year-only form (`YYYY`) is
   not available. Epoch seconds outside years 0000 to 9999 are invalid.
-- A role ARN with a path is matched against its sessions by name; the role
-  ARN derived for `aws:PrincipalArn` from a session ARN has no path. Pass
-  `aws:PrincipalArn` in the context for roles with paths.
+- Principals match by ARN, not by unique ID. IAM turns a user or role ARN
+  in a trust policy into the principal's unique ID when the policy is
+  saved, so deleting and recreating a user or role with the same name
+  breaks the grant ("AWS JSON policy elements: Principal"). Here the
+  recreated principal matches the old ARN. A caller that needs AWS's
+  recreate semantics must bind ARNs to unique IDs itself when a policy is
+  saved, and rewrite stale bindings to values that match nothing before
+  calling `TrustMatch`.
+- Role and user names in ARNs match case-sensitively, in principals as in
+  resources, as the User Guide says of user names ("the user name part of
+  the ARN is case sensitive"). It does not say whether role names compare
+  the same way, so a role named `Admin` in a trust policy does not match a
+  session of `admin` here.
+- A role ARN with a path matches its sessions by name, since a session ARN
+  carries no path. The `aws:PrincipalArn` this package derives from a
+  session ARN is only a fallback, without the path: AWS's value for a role
+  session is the role ARN with its path, so a path-scoped condition (such as
+  a Deny on `arn:aws:iam::*:role/restricted/*`) does not apply to the
+  derived value. Callers must pass `aws:PrincipalArn` in the context for
+  role sessions.
 - `aws:userid` for principals other than the root user comes from the
   context only.
 - The Bool operator replaces policy variables, following the operators page;

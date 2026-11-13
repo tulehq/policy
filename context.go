@@ -61,10 +61,11 @@ func (c *requestContext) variable(name string) (string, bool) {
 // keys" (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html):
 //
 //   - aws:PrincipalArn: "For IAM roles, the request context returns the ARN
-//     of the role, not the ARN of the user that assumed the role." The role
-//     ARN derived from an assumed-role ARN has no path, because the session
-//     ARN does not carry it; pass aws:PrincipalArn in Context for a role
-//     with a path.
+//     of the role, not the ARN of the user that assumed the role." AWS's
+//     value is the role ARN with its path. The value derived here from an
+//     assumed-role ARN is a fallback without the path, because the session
+//     ARN does not carry it, so a path-scoped condition does not apply to
+//     it. Callers must pass aws:PrincipalArn in Context for role sessions.
 //   - aws:PrincipalAccount: the account field of the ARN.
 //   - aws:username: present for IAM users only; the last element of the
 //     user's name and path.
