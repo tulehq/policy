@@ -192,7 +192,19 @@ type condition struct {
 // operator. One can still turn invalid here only through a policy variable,
 // whose value comes from the request, and the condition then holds only in
 // a Deny statement, by the same rule.
+//
+// Unknown keys resolve against the caller in the same way. When the
+// condition's key is unknown (see Request.Unknown), or one of its policy
+// values has a variable naming an unknown key, the condition holds exactly
+// in a Deny statement, whatever its operator: IfExists, Null, ForAnyValue
+// and ForAllValues included. An absent key would instead make negated
+// operators, IfExists, Null with true and ForAllValues hold, which in an
+// Allow statement grants and in a Deny statement under a positive operator
+// stops denying. This too is this package's choice.
 func (c condition) holds(vars bool, rc *requestContext, deny bool) bool {
+	if c.unknown(vars, rc) {
+		return deny
+	}
 	vals, present, decided, result := c.precheck(rc)
 	if decided {
 		return result
@@ -213,6 +225,25 @@ func (c condition) holds(vars bool, rc *requestContext, deny bool) bool {
 		hits[i] = hit
 	}
 	return c.combine(hits)
+}
+
+// unknown reports whether the condition's key is unknown, or a policy
+// value has a variable naming an unknown key. Variables count only where
+// the operator replaces them.
+func (c condition) unknown(vars bool, rc *requestContext) bool {
+	if len(rc.unknown) == 0 {
+		return false
+	}
+	if rc.isUnknown(c.key) {
+		return true
+	}
+	vars = vars && c.op.base.vars()
+	for _, v := range c.values {
+		if mentionsUnknown(v, vars, rc) {
+			return true
+		}
+	}
+	return false
 }
 
 // precheck looks up the condition's key and decides the Null operator,

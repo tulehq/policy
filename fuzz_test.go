@@ -27,11 +27,29 @@ func FuzzParse(f *testing.F) {
 		if p == nil {
 			t.Fatal("Parse returned neither a policy nor an error")
 		}
-		// A parsed policy must evaluate without panicking.
-		Evaluate(anyRequest(ctx("aws:SourceIp", "203.0.113.1")), p)
+		// A parsed policy must evaluate without panicking, and marking
+		// keys unknown must never give the caller a better decision.
+		r := anyRequest(ctx("aws:SourceIp", "203.0.113.1"))
+		before := Evaluate(r, p)
+		r.Unknown = fuzzUnknown
+		checkNoBetter(t, "Evaluate", before.Decision, Evaluate(r, p).Decision)
 		AllowsPrincipal(p, "sts:AssumeRole", "arn:aws:iam::123456789012:user/a", nil)
+		tr := TrustRequest{
+			RoleAccount: "123456789012",
+			Action:      "sts:AssumeRole",
+			Principal:   "arn:aws:iam::123456789012:user/a",
+			Context:     ctx("aws:SourceIp", "203.0.113.1"),
+		}
+		trBefore := EvaluateTrust(p, tr)
+		tr.Unknown = fuzzUnknown
+		checkNoBetter(t, "EvaluateTrust", trBefore.Decision, EvaluateTrust(p, tr).Decision)
 	})
 }
+
+// fuzzUnknown are the keys the fuzz targets mark unknown: the keys their
+// requests carry or the principal implies, and a policy variable's usual
+// key.
+var fuzzUnknown = []string{"aws:SourceIp", "AWS:USERNAME", "k:v", "aws:PrincipalArn", "aws:userid"}
 
 // FuzzGlob checks match against the regexp oracle for action and resource
 // patterns.
@@ -90,7 +108,16 @@ func FuzzEvaluate(f *testing.F) {
 			Principal: principal,
 			Context:   ctx(key, value),
 		}
-		checkResult(t, Evaluate(r, ps...), len(ps))
+		before := Evaluate(r, ps...)
+		checkResult(t, before, len(ps))
+		// Marking the fuzzed key unknown, alone or with the documented
+		// policies' keys, never gives the caller a better decision.
+		for _, unknown := range [][]string{{key}, append([]string{key}, fuzzUnknown...)} {
+			r.Unknown = unknown
+			after := Evaluate(r, ps...)
+			checkResult(t, after, len(ps))
+			checkNoBetter(t, "Evaluate", before.Decision, after.Decision)
+		}
 	})
 }
 
@@ -132,6 +159,17 @@ func FuzzJunkNeverGrants(f *testing.F) {
 			if b.Decision != Allow && a.Decision == Allow {
 				t.Fatalf("%s: appending %q turned %v into Allow", fam.name, junk, b.Decision)
 			}
+			// With the key unknown, junk or not, the Allow never applies
+			// and the Deny always does.
+			u := anyRequest(after)
+			u.Unknown = []string{"K:V"}
+			want := ImplicitDeny
+			if len(ps) == 2 {
+				want = ExplicitDeny
+			}
+			if got := Evaluate(u, ps...); got.Decision != want {
+				t.Fatalf("%s: unknown key gave %v, want %v", fam.name, got.Decision, want)
+			}
 		}
 	})
 }
@@ -166,10 +204,16 @@ func FuzzParseResource(f *testing.F) {
 		// caller, within its account and from another.
 		for _, c := range []Caller{devUser, session, orphan, root, {}} {
 			for _, account := range []string{acct, other} {
-				checkAuthorization(t, Authorize(AuthorizeRequest{
+				req := AuthorizeRequest{
 					Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k", ResourceAccount: account,
 					Caller: c, Context: ctx("aws:SourceIp", "203.0.113.1"),
-				}, p), account == c.AccountID)
+				}
+				before := Authorize(req, p)
+				checkAuthorization(t, before, account == c.AccountID)
+				req.Unknown = fuzzUnknown
+				after := Authorize(req, p)
+				checkAuthorization(t, after, account == c.AccountID)
+				checkNoBetter(t, "Authorize", before.Decision, after.Decision)
 			}
 		}
 	})
@@ -211,14 +255,14 @@ const denyAll = `{"Version":"2012-10-17","Statement":{"Effect":"Deny","Action":"
 func FuzzAuthorize(f *testing.F) {
 	for _, c := range []Caller{devUser, session, orphan, root} {
 		f.Add(c.AccountID, c.ARN, c.PrincipalARN, c.UserID, string(c.Type), acct,
-			"s3:GetObject", "arn:aws:s3:::b/k", uint8(2), false)
+			"s3:GetObject", "arn:aws:s3:::b/k", uint8(2), false, "")
 	}
 	f.Add(other, "arn:aws:iam::"+other+":user/x", "arn:aws:iam::"+other+":user/x",
 		"AIDAXEXAMPLE000000001", "User", acct, "s3:PutObject",
-		"arn:aws:s3:::b/private/k", uint8(3), true)
+		"arn:aws:s3:::b/private/k", uint8(3), true, "aws:PrincipalArn")
 	f.Fuzz(
 		func(t *testing.T, account, arn, principalARN, userID, typ, resAccount, action, resource string,
-			doc uint8, idAllow bool,
+			doc uint8, idAllow bool, unknown string,
 		) {
 			c := Caller{
 				AccountID:    account,
@@ -245,6 +289,11 @@ func FuzzAuthorize(f *testing.F) {
 				return
 			}
 			checkAuthorization(t, got, account == resAccount)
+			withUnknown := req
+			withUnknown.Unknown = []string{unknown}
+			u := Authorize(withUnknown, rp, ids...)
+			checkAuthorization(t, u, account == resAccount)
+			checkNoBetter(t, "Authorize", got.Decision, u.Decision)
 			if d := Authorize(
 				req,
 				rp,

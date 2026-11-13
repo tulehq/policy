@@ -52,6 +52,15 @@ type Request struct {
 	// Context holds the request's condition context keys and their values.
 	// Key names are matched case-insensitively.
 	Context map[string][]string
+	// Unknown names context keys whose values the caller could not
+	// determine, such as aws:PrincipalOrgID when the organization service
+	// cannot be reached. A condition that tests an unknown key, or a
+	// condition value or Resource entry whose policy variable names one,
+	// takes the result worse for the caller: it never holds (or matches)
+	// in an Allow statement and always does in a Deny statement. Names
+	// match case-insensitively, and an unknown key is unknown whatever
+	// Context or Principal gives it.
+	Unknown []string
 }
 
 // Result is the decision for a request and the statement that made it.
@@ -95,7 +104,7 @@ func Evaluate(req Request, policies ...*Policy) Result {
 	return evaluateIdentity(
 		req.Action,
 		req.Resource,
-		newRequestContext(req.Principal, req.Context),
+		newRequestContext(req.Principal, req.Context).withUnknown(req.Unknown),
 		policies,
 	)
 }
@@ -176,20 +185,53 @@ func TrustMatch(
 	roleAccount, action, principalARN string,
 	ctx map[string][]string,
 ) TrustResult {
+	return EvaluateTrust(trust, TrustRequest{
+		RoleAccount: roleAccount,
+		Action:      action,
+		Principal:   principalARN,
+		Context:     ctx,
+	})
+}
+
+// TrustRequest is one request to evaluate against a role trust policy
+// with EvaluateTrust. Its fields are TrustMatch's parameters of the same
+// meaning, and Unknown is as in Request.
+//
+//nolint:govet // fieldalignment: the field order is the published API.
+type TrustRequest struct {
+	// RoleAccount is the 12-digit account ID of the role the trust policy
+	// is attached to.
+	RoleAccount string
+	// Action is the action requested, such as "sts:AssumeRole".
+	Action string
+	// Principal is the ARN of the caller.
+	Principal string
+	// Context holds the request's condition context keys and their values.
+	Context map[string][]string
+	// Unknown names context keys whose values the caller could not
+	// determine; see Request.Unknown.
+	Unknown []string
+}
+
+// EvaluateTrust is TrustMatch for req, with req.Unknown naming the keys
+// whose values are unknown (see Request.Unknown). With no unknown keys it
+// is TrustMatch(trust, req.RoleAccount, req.Action, req.Principal,
+// req.Context).
+func EvaluateTrust(trust *Policy, req TrustRequest) TrustResult {
 	res := TrustResult{Decision: ImplicitDeny}
 	if trust == nil {
 		return res
 	}
-	rc := newRequestContext(principalARN, ctx)
+	rc := newRequestContext(req.Principal, req.Context).withUnknown(req.Unknown)
 	for _, s := range trust.statements {
-		kind, applies := s.trusts(action, principalARN, trust.vars, rc)
+		kind, applies := s.trusts(req.Action, req.Principal, trust.vars, rc)
 		if !applies {
 			continue
 		}
 		if s.effect == effectDeny {
 			return TrustResult{Decision: ExplicitDeny, Sid: s.sid}
 		}
-		direct := kind == matchDirect && sameAccount(principalARN, roleAccount)
+		direct := kind == matchDirect && sameAccount(req.Principal, req.RoleAccount)
 		if res.Decision == ImplicitDeny || direct && !res.Direct {
 			res = TrustResult{Decision: Allow, Direct: direct, Sid: s.sid}
 		}
@@ -252,9 +294,21 @@ func (s *statement) matchesAction(action string) bool {
 // the IAM user name is case sensitive."; Resource page). An entry whose
 // variable has no value matches no resource, so it excludes none under
 // NotResource.
+//
+// An entry whose variable names an unknown key (see Request.Unknown)
+// decides the whole element against the caller, Resource or NotResource:
+// the statement's resource never matches in an Allow statement and always
+// matches in a Deny statement, whatever the other entries say. This is
+// this package's choice, as for malformed request values (see
+// condition.holds).
 func (s *statement) matchesResource(resource string, vars bool, rc *requestContext) bool {
 	if !s.hasResource {
 		return false
+	}
+	for _, raw := range s.resources {
+		if resourceUnknown(raw, vars, rc) {
+			return s.effect == effectDeny
+		}
 	}
 	for _, raw := range s.resources {
 		if p, ok := resourcePattern(raw, vars, rc); ok && p.match(resource, false) {

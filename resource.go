@@ -143,6 +143,10 @@ type AuthorizeRequest struct {
 	// value Context gives them (aws:username is an IAM user's name, absent
 	// for other callers).
 	Context map[string][]string
+	// Unknown names context keys whose values the caller could not
+	// determine, as in Request. It applies to the keys that come from
+	// Caller too.
+	Unknown []string
 }
 
 // Authorization is Authorize's decision and why it was made.
@@ -235,7 +239,7 @@ func Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy) Auth
 			Resource: none,
 		}
 	}
-	rc := callerContext(req.Caller, req.Context)
+	rc := callerContext(req.Caller, req.Context).withUnknown(req.Unknown)
 	id := evaluateIdentity(req.Action, req.Resource, rc, identity)
 	if req.Caller.Type == PrincipalTypeAccount && id.Decision == ImplicitDeny {
 		id = Result{Decision: Allow, Policy: -1}
