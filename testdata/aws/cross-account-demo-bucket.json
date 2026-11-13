@@ -1,0 +1,16 @@
+{
+    "Version":"2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject*",
+                "s3:PutObject*",
+                "s3:ReplicateObject",
+                "s3:RestoreObject"
+            ],
+            "Principal": { "AWS": "arn:aws:iam::111111111111:role/Demo" },
+            "Resource": "arn:aws:s3:::amzn-s3-demo-bucket-production/*"
+        }
+    ]
+}
