@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // A statement with a Principal, which the lenient Parse accepts, is not an
 // identity statement: Evaluate must not apply it to anyone.
@@ -105,3 +108,38 @@ var arnShapeCases = []evalCase{
 }
 
 func TestARNShapes(t *testing.T) { runEvalCases(t, arnShapeCases) }
+
+// Principal types stay apart: each takes only its own kind of identifier.
+func TestPrincipalTypes(t *testing.T) {
+	trust := func(principal string) string {
+		return `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":` + principal +
+			`,"Action":"sts:AssumeRole"}}`
+	}
+	for _, bad := range []string{
+		`{"Service":"arn:aws:iam::111122223333:user/alice"}`,
+		`{"Service":"123456789012"}`,
+		`{"AWS":"ec2.amazonaws.com"}`,
+		`{"AWS":"arn:aws:s3:::bucket"}`,
+		`{"Federated":"111122223333"}`,
+		`{"Federated":"arn:aws:iam::111122223333:user/alice"}`,
+		`{"CanonicalUser":"arn:aws:iam::111122223333:user/alice"}`,
+	} {
+		_, err := ParseTrust([]byte(trust(bad)))
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Message != msgPrincipal {
+			t.Errorf("ParseTrust(%s) = %v, want %q", bad, err, msgPrincipal)
+		}
+	}
+	for _, good := range []string{
+		`{"Service":"ec2.amazonaws.com"}`,
+		`{"Federated":"accounts.google.com"}`,
+		`{"Federated":"arn:aws:iam::111122223333:saml-provider/corp"}`,
+		`{"Federated":"arn:aws:iam::111122223333:oidc-provider/tokens.actions.githubusercontent.com"}`,
+		`{"CanonicalUser":"79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be"}`,
+		`{"AWS":["123456789012","arn:aws:iam::123456789012:root","arn:aws:sts::123456789012:assumed-role/r/s"]}`,
+	} {
+		if _, err := ParseTrust([]byte(trust(good))); err != nil {
+			t.Errorf("ParseTrust(%s) = %v", good, err)
+		}
+	}
+}

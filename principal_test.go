@@ -132,13 +132,6 @@ var trustCases = []struct { //nolint:govet // fieldalignment: field order reads 
 		"elasticloadbalancing.amazonaws.com", nil, true,
 	},
 	{"service other", `{"Service":"ecs.amazonaws.com"}`, "lambda.amazonaws.com", nil, false},
-	{
-		"service does not match account",
-		`{"Service":"123456789012"}`,
-		"arn:aws:iam::123456789012:user/a",
-		nil,
-		false,
-	},
 }
 
 func TestAllowsPrincipal(t *testing.T) {

@@ -183,18 +183,21 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   choice.
 
 **Trust policies** (`reference_policies_elements_principal.html`,
-`..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic
-to statements whose action matches, whose `Principal` names the caller (or
+`..._notprincipal.html`). `TrustMatch` applies the same deny-wins logic to
+statements whose action matches, whose `Principal` names the caller (or
 whose `NotPrincipal` does not), and whose conditions hold; a statement with
-no `Principal` or with a `Resource` never applies. `"*"` and `{"AWS":"*"}`
-match anyone. An account ID or
-`arn:...:iam::ACCOUNT:root` matches every principal of the account. A role
-ARN matches the role's sessions (`arn:...:sts::ACCOUNT:assumed-role/NAME/...`,
-by partition, account and name, so a role path does not matter). Only the
+no `Principal` or with a `Resource` never applies. Each principal type takes
+only its own kind of value, and anything else is refused at parse: `AWS` an
+account ID, an IAM or STS ARN, or `"*"`; `Service` a service principal such
+as `ecs.amazonaws.com`; `Federated` a SAML or OIDC provider ARN or a
+built-in provider such as `accounts.google.com`; `CanonicalUser` a 64-digit
+hexadecimal ID. Partial wildcards are refused. `"*"` and `{"AWS":"*"}` match
+anyone. An account ID or `arn:...:iam::ACCOUNT:root` matches every
+principal of the account. A role ARN matches the role's sessions
+(`arn:...:sts::ACCOUNT:assumed-role/NAME/SESSION`, by partition, account and
+name, so a role path does not matter). Other values match exactly. Only the
 `principalARN` argument identifies the caller; the context, including
-`aws:PrincipalArn`, plays no part in matching principals. Other values (user, session,
-federated-user ARNs, `Service`, `Federated`, `CanonicalUser`) match exactly.
-Partial wildcards in principals are rejected.
+`aws:PrincipalArn`, plays no part in matching principals.
 
 `TrustMatch` also reports whether the Allow is direct: by `"*"`, or by the
 caller's own user, role or role-session ARN (or service, federated or

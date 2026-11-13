@@ -84,11 +84,48 @@ func checkPrincipalIDs(typ string, ids []string) (all, ok bool) {
 		switch {
 		case id == "*" && typ == "AWS":
 			all = true
-		case id == "" || strings.ContainsAny(id, "*?"):
+		case strings.ContainsAny(id, "*?") || !principalIDTypes[typ](id):
 			return false, false
 		}
 	}
 	return all, true
+}
+
+// principalIDTypes checks that a value has the form of its principal type,
+// so that the types stay apart ("AWS JSON policy elements: Principal"):
+//
+//   - AWS: a 12-digit account ID, or an IAM or STS ARN (account root,
+//     user, role, assumed-role session, federated user).
+//   - Service: a service principal such as "ecs.amazonaws.com", a dotted
+//     name that is not an ARN.
+//   - Federated: an IAM SAML or OIDC provider ARN, or a built-in OIDC
+//     provider such as "accounts.google.com".
+//   - CanonicalUser: a canonical user ID, 64 hexadecimal digits, as in the
+//     page's example.
+var principalIDTypes = map[string]func(string) bool{
+	"AWS": func(id string) bool {
+		a, ok := parseARN(id)
+		return isAccountID(id) ||
+			ok && (a.service == "iam" || a.service == "sts") && a.account != ""
+	},
+	"Service": isDottedName,
+	"Federated": func(id string) bool {
+		a, ok := parseARN(id)
+		if ok {
+			return a.service == "iam" &&
+				(strings.HasPrefix(a.resource, "saml-provider/") || strings.HasPrefix(a.resource, "oidc-provider/"))
+		}
+		return isDottedName(id)
+	},
+	"CanonicalUser": func(id string) bool {
+		return len(id) == 64 && strings.Trim(id, "0123456789abcdef") == ""
+	},
+}
+
+// isDottedName reports whether id is a dotted host-style name, not an ARN
+// or an account ID.
+func isDottedName(id string) bool {
+	return strings.Contains(id, ".") && !strings.ContainsAny(id, ": ")
 }
 
 // matchKind is how a Principal element names a caller.
