@@ -21,7 +21,12 @@ func parseARN(s string) (arn, bool) {
 	return arn{partition: f[1], service: f[2], region: f[3], account: f[4], resource: f[5]}, true
 }
 
-func (a arn) isRoot() bool { return a.service == "iam" && a.resource == "root" }
+// isRoot reports whether a is an account's root ARN,
+// arn:partition:iam::account-id:root: an IAM ARN, so with a blank region,
+// and a 12-digit account ("IAM identifiers", IAM ARNs).
+func (a arn) isRoot() bool {
+	return a.service == "iam" && a.resource == "root" && a.region == "" && isAccountID(a.account)
+}
 
 // assumedRole returns the role name of an assumed-role session ARN,
 // arn:partition:sts::account:assumed-role/role-name/role-session-name. An

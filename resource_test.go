@@ -308,3 +308,20 @@ func TestAuthorizeIgnoresOtherKinds(t *testing.T) {
 		t.Errorf("trust policy as identity policy: %+v", got)
 	}
 }
+
+// An IAM root ARN has a blank region and a 12-digit account ("IAM
+// identifiers").
+func TestIsRoot(t *testing.T) {
+	for s, want := range map[string]bool{
+		"arn:aws:iam::" + acct + ":root":          true,
+		"arn:aws:iam:us-east-1:" + acct + ":root": false,
+		"arn:aws:iam::12345:root":                 false,
+		"arn:aws:iam::" + acct + ":ROOT":          false,
+		"arn:aws:sts::" + acct + ":root":          false,
+	} {
+		a, _ := parseARN(s)
+		if got := a.isRoot(); got != want {
+			t.Errorf("isRoot(%s) = %v, want %v", s, got, want)
+		}
+	}
+}
