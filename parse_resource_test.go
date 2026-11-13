@@ -2,6 +2,8 @@ package policy
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -172,5 +174,50 @@ func TestUniqueIDsOnlyInResourcePolicies(t *testing.T) {
 		if _, err := parse([]byte(doc)); !errors.As(err, &pe) || pe.Message != msgPrincipal {
 			t.Errorf("%s: %v, want %q", name, err, msgPrincipal)
 		}
+	}
+}
+
+// A resource-based policy's Sid follows its service's rule, not IAM's
+// alphanumeric one: SQS AddPermission labels and Lambda statement IDs take
+// hyphens and underscores. The other kinds keep IAM's rule, and a Sid stays
+// unique within any policy.
+func TestResourcePolicySidsAreTheServices(t *testing.T) {
+	doc := func(sids ...string) []byte {
+		var b strings.Builder
+		b.WriteString(`{"Version":"2012-10-17","Statement":[`)
+		for i, sid := range sids {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"Sid":%q,"Effect":"Allow","Principal":{"AWS":"123456789012"},`+
+				`"Action":"sqs:SendMessage","Resource":"*"}`, sid)
+		}
+		b.WriteString("]}")
+		return []byte(b.String())
+	}
+	for _, sid := range []string{"Queue1_SendMessage", "my-label", "lambda-invoke_1", "has space"} {
+		p, err := ParseResource(doc(sid))
+		if err != nil || p == nil {
+			t.Fatalf("ParseResource with Sid %q: %v, want accepted", sid, err)
+		}
+	}
+	var pe *ParseError
+	if _, err := ParseResource(doc("a-b", "a-b")); !errors.As(err, &pe) {
+		t.Fatalf("ParseResource with a repeated Sid: %v, want refused", err)
+	}
+}
+
+// The identity and trust kinds keep IAM's alphanumeric Sid rule.
+func TestIdentityAndTrustSidsStayAlphanumeric(t *testing.T) {
+	var pe *ParseError
+	identity := []byte(`{"Version":"2012-10-17","Statement":[{"Sid":"a-b","Effect":"Allow",` +
+		`"Action":"s3:GetObject","Resource":"*"}]}`)
+	if _, err := ParseIdentity(identity); !errors.As(err, &pe) || pe.Message != msgSidChars {
+		t.Fatalf("ParseIdentity with Sid a-b: %v, want %q", err, msgSidChars)
+	}
+	trust := []byte(`{"Version":"2012-10-17","Statement":[{"Sid":"a_b","Effect":"Allow",` +
+		`"Principal":{"AWS":"123456789012"},"Action":"sts:AssumeRole"}]}`)
+	if _, err := ParseTrust(trust); !errors.As(err, &pe) || pe.Message != msgSidChars {
+		t.Fatalf("ParseTrust with Sid a_b: %v, want %q", err, msgSidChars)
 	}
 }
