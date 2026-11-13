@@ -1024,9 +1024,10 @@ var rpReviewCases = []rpCase{
 		want:   policy.Allow,
 	},
 	{
-		name:   "account id principal in another partition",
-		src:    docIdentifiers,
-		stated: "You cannot delegate access between accounts in different partitions",
+		name: "account id principal names the caller's account in any partition",
+		src:  docPrincipal,
+		stated: "CHOICE: an account ID carries no partition, so it is matched by the caller's AccountID " +
+			"alone; matching never depends on the request's resource",
 		resource: rpBucket(
 			"Allow",
 			`"Principal":{"AWS":"`+rpOther+`"}`,
@@ -1034,8 +1035,7 @@ var rpReviewCases = []rpCase{
 		),
 		identity: []string{rpAllowGet},
 		caller:   rpCN,
-		want:     policy.ImplicitDeny,
-		reason:   policy.NoResourceAllow,
+		want:     policy.Allow,
 	},
 	{
 		name:     "root arn principal in another partition",
@@ -1059,6 +1059,56 @@ var rpCN = policy.Caller{
 }
 
 func TestConformanceResourceReview(t *testing.T) { rpRun(t, rpReviewCases) }
+
+// rpListDeny is a resource-based policy with a Deny naming principal and
+// an Allow for everyone, both on every resource, for a request on "*",
+// as a List action without a resource type makes.
+func rpListDeny(principal string) string {
+	return `{"Version":"2012-10-17","Statement":[` +
+		`{"Sid":"Deny","Effect":"Deny","Principal":{"AWS":"` + principal + `"},"Action":"*","Resource":"*"},` +
+		`{"Sid":"Allow","Effect":"Allow","Principal":"*","Action":"*","Resource":"*"}]}`
+}
+
+const allowAllIdentity = `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"*","Resource":"*"}}`
+
+// Principal matching never depends on the request's resource being an
+// ARN: an account Deny must apply on "*" as on any resource.
+var rpStarResourceCases = []rpCase{
+	{
+		name:     "account id deny on resource star",
+		src:      docEvalDenyAll,
+		stated:   "If the enforcement code finds even one explicit deny that applies ... Deny",
+		resource: rpListDeny(rpAcct),
+		identity: []string{allowAllIdentity},
+		caller:   rpDev,
+		action:   "s3:ListAllMyBuckets",
+		res:      "*",
+		want:     policy.ExplicitDeny,
+		reason:   policy.ResourceDeny,
+	},
+	{
+		name:   "root arn deny on resource star",
+		src:    docPrincipal,
+		stated: "The account ARN and the shortened account ID behave the same way",
+		resource: rpListDeny(
+			"arn:aws:iam::" + rpAcct + ":root",
+		),
+		identity: []string{allowAllIdentity},
+		caller:   rpReader,
+		action:   "sqs:ListQueues",
+		res:      "*",
+		want:     policy.ExplicitDeny,
+		reason:   policy.ResourceDeny,
+	},
+	{
+		name: "control: another account's deny on resource star", src: docPrincipal,
+		stated:   "an account principal names that account",
+		resource: rpListDeny(rpOther), identity: []string{allowAllIdentity}, caller: rpDev,
+		action: "secretsmanager:ListSecrets", res: "*", want: policy.Allow,
+	},
+}
+
+func TestConformanceResourceStarResource(t *testing.T) { rpRun(t, rpStarResourceCases) }
 
 // ---------------------------------------------------------------------------
 // Principal values at parse
