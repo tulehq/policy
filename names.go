@@ -26,19 +26,24 @@ func isIAMName(s string) bool {
 }
 
 // isPathName reports whether the resource field of an IAM user or role
-// ARN has the form kind/path/name, with kind "user/" or "role/": an
-// optional path of printable ASCII and a valid name. A policy variable
-// makes it invalid: principals take no variables ("You cannot use a
-// wildcard to match part of a principal name or ARN.", and variables are
-// replaced only in the elements "IAM policy elements: Variables and tags"
-// lists, which do not include Principal).
+// ARN has the form kind + path + name, with kind "user/" or "role/": the
+// entity's path, IAM's pathType (/) | (/[\u0021-\u007E]+/), with its
+// leading "/" taken by kind, then a valid name. So "user/bob" (path "/")
+// and "user/a//b/bob" (path "/a//b/") have the form, and "user//bob"
+// (path "//") does not. A path may hold any printable ASCII, "${", "*" and
+// "?" included; a policy principal refuses those separately (see
+// validPrincipalID and isResourcePrincipalARN).
 func isPathName(resource, kind string) bool {
 	rest, ok := strings.CutPrefix(resource, kind)
-	if !ok || strings.Contains(rest, "${") {
+	if !ok {
 		return false
 	}
 	i := strings.LastIndexByte(rest, '/')
-	for _, c := range []byte(rest[:i+1]) {
+	path := rest[:i+1]
+	if path == "/" {
+		return false
+	}
+	for _, c := range []byte(path) {
 		if c < 0x21 || c > 0x7e {
 			return false
 		}
@@ -83,9 +88,14 @@ func iamARN(s string) (arn, bool) {
 // resource-based policy"). Anything else is refused, a group among them:
 // "You cannot identify a user group as a principal in a policy (such as a
 // resource-based policy)".
+//
+// A policy variable is refused too: variables are replaced only in the
+// elements "IAM policy elements: Variables and tags" lists, which do not
+// include Principal, so "${" could only be literal path text that names
+// no principal a policy author means.
 func isResourcePrincipalARN(id string) bool {
 	a, ok := iamARN(id)
-	if !ok {
+	if !ok || strings.Contains(id, "${") {
 		return false
 	}
 	if a.service == "iam" {

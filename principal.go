@@ -100,12 +100,17 @@ func checkPrincipalIDs(typ string, ids []string, resource bool) (all, ok bool) {
 }
 
 // validPrincipalID reports whether id, not "*", is a valid value of the
-// principal type typ.
+// principal type typ. No value of any type or policy kind may hold a
+// wildcard: "You cannot use a wildcard to match part of a principal name
+// or ARN." (Principal page).
 func validPrincipalID(typ, id string, resource bool) bool {
+	if strings.ContainsAny(id, "*?") {
+		return false
+	}
 	if resource && typ == "AWS" {
 		return isAccountID(id) || isUniqueID(id) || isResourcePrincipalARN(id)
 	}
-	return !strings.ContainsAny(id, "*?") && principalIDTypes[typ](id)
+	return principalIDTypes[typ](id)
 }
 
 // Unique ID prefixes: "AIDA" for an IAM user, "AROA" for a role ("IAM

@@ -394,13 +394,25 @@ func TestCallerValid(t *testing.T) {
 		"session user id":         with(session, func(c *Caller) { c.UserID = devUser.UserID }),
 		"session id other name":   with(session, func(c *Caller) { c.UserID = "AROAREADEREXAMPLE0001:s2" }),
 		"empty type":              with(devUser, func(c *Caller) { c.Type = "" }),
+		"user path with //":       with(devUser, func(c *Caller) { c.ARN = "arn:aws:iam::" + acct + ":user//dev"; c.PrincipalARN = c.ARN }),
+		"role path with //":       with(session, func(c *Caller) { c.PrincipalARN = "arn:aws:iam::" + acct + ":role//Reader" }),
 		"empty":                   {},
 	} {
 		if c.valid() {
 			t.Errorf("%s: valid %+v", name, c)
 		}
 	}
-	for _, c := range []Caller{devUser, session, orphan, root} {
+	// IAM's pathType allows "${" in a path: identity can issue such a user
+	// or role, and the caller check takes it.
+	vars := with(
+		devUser,
+		func(c *Caller) { c.ARN = "arn:aws:iam::" + acct + ":user/${x}/dev"; c.PrincipalARN = c.ARN },
+	)
+	varsRole := with(
+		session,
+		func(c *Caller) { c.PrincipalARN = "arn:aws:iam::" + acct + ":role/${x}/Reader" },
+	)
+	for _, c := range []Caller{devUser, session, orphan, root, vars, varsRole} {
 		if !c.valid() {
 			t.Errorf("invalid %+v", c)
 		}
