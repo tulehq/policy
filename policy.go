@@ -300,11 +300,11 @@ func (s *statement) matchesAction(action string) bool {
 // NotResource.
 //
 // An entry whose variable names an unknown key (see Request.Unknown) is
-// decided on its own, against the caller: it is "*" where matching it
-// makes the statement apply (Resource in a Deny statement, NotResource in
-// an Allow statement), and it is dropped where matching it would make the
-// statement apply (Resource in an Allow, NotResource in a Deny). The other
-// entries match as usual. This is this package's choice, as for malformed
+// decided on its own, against the caller: it is "*" for Resource in a
+// Deny statement (the Deny applies) and NotResource in an Allow statement
+// (the Allow does not), and it is dropped for Resource in an Allow (it
+// grants nothing) and NotResource in a Deny (it exempts nothing). The
+// other entries match as usual. This is this package's choice, as for malformed
 // request values (see condition.holds).
 func (s *statement) matchesResource(resource string, vars bool, rc *requestContext) bool {
 	if !s.hasResource {
