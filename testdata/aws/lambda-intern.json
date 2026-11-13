@@ -1,0 +1,67 @@
+{
+    "Version":"2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadOnlyPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:GetAccountSettings",
+                "lambda:GetEventSourceMapping",
+                "lambda:GetFunction",
+                "lambda:GetFunctionConfiguration",
+                "lambda:GetFunctionCodeSigningConfig",
+                "lambda:GetFunctionConcurrency",
+                "lambda:ListEventSourceMappings",
+                "lambda:ListFunctions",
+                "lambda:ListTags",
+                "iam:ListRoles"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "DevelopFunctions",
+            "Effect": "Allow",
+            "NotAction": [
+                "lambda:AddPermission",
+                "lambda:PutFunctionConcurrency"
+            ],
+            "Resource": "arn:aws:lambda:*:*:function:intern-*"
+        },
+        {
+            "Sid": "DevelopEventSourceMappings",
+            "Effect": "Allow",
+            "Action": [
+                "lambda:DeleteEventSourceMapping",
+                "lambda:UpdateEventSourceMapping",
+                "lambda:CreateEventSourceMapping"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "ArnLike": {
+                    "lambda:FunctionArn": "arn:aws:lambda:*:*:function:intern-*"
+                }
+            }
+        },
+        {
+            "Sid": "PassExecutionRole",
+            "Effect": "Allow",
+            "Action": [
+                "iam:ListRolePolicies",
+                "iam:ListAttachedRolePolicies",
+                "iam:GetRole",
+                "iam:GetRolePolicy",
+                "iam:PassRole",
+                "iam:SimulatePrincipalPolicy"
+            ],
+            "Resource": "arn:aws:iam::*:role/intern-lambda-execution-role"
+        },
+        {
+            "Sid": "ViewLogs",
+            "Effect": "Allow",
+            "Action": [
+                "logs:*"
+            ],
+            "Resource": "arn:aws:logs:*:*:log-group:/aws/lambda/intern-*"
+        }
+    ]
+}

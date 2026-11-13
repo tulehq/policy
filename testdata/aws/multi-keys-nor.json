@@ -1,0 +1,30 @@
+{
+  "Version":"2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ExamplePolicy",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::amzn-s3-demo-bucket",
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalTag/department": [
+            "finance",
+            "hr",
+            "legal"
+          ],
+          "aws:PrincipalTag/role": [
+            "audit",
+            "security"
+          ]
+        },
+        "ArnNotLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::222222222222:user/Ana",
+            "arn:aws:iam::222222222222:user/Mary"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "Version":"2012-10-17",
+  "Statement": [
+   {
+    "Effect": "Deny",
+    "Action": "s3:GetObject",
+    "Resource": "arn:aws:s3:::amzn-s3-demo-bucket/*",
+    "Condition": {
+      "StringNotEquals": {
+        "s3:ExistingObjectTag/Team": "${aws:PrincipalTag/Team}"
+       }
+      }
+    }
+  ]
+}

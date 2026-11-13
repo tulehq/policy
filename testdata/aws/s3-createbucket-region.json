@@ -1,0 +1,27 @@
+{
+   "Version":"2012-10-17",
+   "Statement":[
+      {
+         "Sid":"statement1",
+         "Effect":"Allow",
+         "Action": "s3:CreateBucket",
+         "Resource": "arn:aws:s3:::*",
+         "Condition": {
+             "StringLike": {
+                 "s3:LocationConstraint": "sa-east-1"
+             }
+         }
+       },
+      {
+         "Sid":"statement2",
+         "Effect":"Deny",
+         "Action": "s3:CreateBucket",
+         "Resource": "arn:aws:s3:::*",
+         "Condition": {
+             "StringNotLike": {
+                 "s3:LocationConstraint": "sa-east-1"
+             }
+         }
+       }
+    ]
+}

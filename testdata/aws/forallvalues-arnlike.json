@@ -1,0 +1,18 @@
+{
+    "Version":"2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "logs:PutDeliverySource",
+            "Resource": "arn:aws:logs:us-east-1:123456789012:delivery-source:*",
+            "Condition": {
+                "ForAllValues:ArnLike": {
+                    "logs:LogGeneratingResourceArns": [
+                        "arn:aws:cloudfront::123456789012:distribution/*",
+                        "arn:aws:cloudfront::123456789012:distribution/support*"
+                    ]
+                }
+            }
+        }
+    ]
+}

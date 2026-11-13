@@ -1,0 +1,19 @@
+{
+  "Version":"2012-10-17",
+  "Statement": {
+    "Effect": "Allow",
+    "Action": "ec2:CreateTags",
+    "Resource": "arn:aws:ec2:*:*:instance/*",
+    "Condition": {
+      "StringEqualsIgnoreCase": {
+        "aws:RequestTag/environment": [
+          "preprod",
+          "storage"
+        ]
+      },
+      "ForAnyValue:StringEquals": {
+        "aws:TagKeys": "environment"
+      }
+    }
+  }
+}

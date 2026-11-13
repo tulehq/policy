@@ -1,0 +1,21 @@
+{
+    "Version":"2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "ec2:DeleteTags",
+            "Resource": "arn:aws:ec2:us-east-1:111122223333:instance/*",
+            "Condition": {
+                "ForAllValues:StringEquals": {
+                    "aws:TagKeys": [
+                        "environment",
+                        "cost-center"
+                    ]
+                },
+                "Null": {
+                    "aws:TagKeys": "false"
+                }
+            }
+        }
+    ]
+}
