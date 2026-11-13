@@ -36,6 +36,8 @@ const (
 	msgSidChars        = "Statement IDs (SID) must contain only alphanumeric characters."
 	msgPrincipal       = "Invalid principal in policy"
 	msgNotPrincipalEff = "NotPrincipal must be used with \"Effect\":\"Deny\"."
+	msgOperator        = "Condition operator %s is not valid."
+	msgConditionValue  = "Condition value %s is not valid for %s."
 )
 
 func parseErr(format string, args ...any) *ParseError {
@@ -107,7 +109,7 @@ func Parse(doc []byte) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.statements, err = parseStatements(stmts); err != nil {
+	if p.statements, err = parseStatements(stmts, p.vars); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -163,7 +165,7 @@ func parseVersion(v any) (bool, error) {
 // non-empty array of them. The grammar gives an array; the element
 // reference's examples and the IAM User Guide's own policies also use a
 // single object.
-func parseStatements(v any) ([]statement, error) {
+func parseStatements(v any, vars bool) ([]statement, error) {
 	list, isList := v.([]any)
 	if !isList {
 		list = []any{v}
@@ -178,7 +180,7 @@ func parseStatements(v any) ([]statement, error) {
 		if !ok {
 			return nil, parseErr(msgSyntax)
 		}
-		s, err := parseStatement(obj)
+		s, err := parseStatement(obj, vars)
 		if err != nil {
 			return nil, err
 		}
@@ -196,6 +198,8 @@ func parseStatements(v any) ([]statement, error) {
 // rawStatement is a statement's elements before validation.
 type rawStatement struct {
 	fields map[string]any
+	// vars is whether the policy's Version replaces policy variables.
+	vars bool
 }
 
 func (r rawStatement) get(name string) (any, bool) {
@@ -224,8 +228,8 @@ var statementElements = map[string]bool{
 	"Condition": true,
 }
 
-func parseStatement(obj object) (statement, error) {
-	raw := rawStatement{fields: make(map[string]any, len(obj))}
+func parseStatement(obj object, vars bool) (statement, error) {
+	raw := rawStatement{fields: make(map[string]any, len(obj)), vars: vars}
 	for _, m := range obj {
 		if !statementElements[m.name] {
 			return statement{}, parseErr(msgSyntax)
@@ -406,8 +410,13 @@ func checkResource(res string) error {
 // ("IAM JSON policy elements: Condition",
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition.html).
 // A value is a string, number or boolean, or a non-empty array of them.
-// Operators are not checked here: an unknown one makes the statement never
-// apply (see operator.known).
+//
+// An unknown operator, and a value that cannot be valid for its operator
+// (see checkConditionValue), are rejected here rather than left to fail at
+// evaluation: a condition that could never hold would make a Deny statement
+// silently deny nothing. So a Deny statement in a parsed policy fails to
+// apply only because the request lacks a key or its values do not match,
+// never because the policy is malformed.
 func parseConditionElement(s *statement, r rawStatement) error {
 	v, ok := r.get("Condition")
 	if !ok {
@@ -422,11 +431,19 @@ func parseConditionElement(s *statement, r rawStatement) error {
 		if !ok {
 			return parseErr(msgSyntax)
 		}
-		op := parseOperator(opm.name)
+		op, known := parseOperator(opm.name)
+		if !known {
+			return parseErr(msgOperator, opm.name)
+		}
 		for _, km := range keys {
 			values, err := conditionValues(km.value)
 			if err != nil {
 				return err
+			}
+			for _, v := range values {
+				if !checkConditionValue(op.base, v, r.vars) {
+					return parseErr(msgConditionValue, v, opm.name)
+				}
 			}
 			s.conditions = append(s.conditions, condition{op: op, key: km.name, values: values})
 		}

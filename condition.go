@@ -111,24 +111,20 @@ const (
 
 // operator is a parsed condition operator name.
 type operator struct {
-	// known is false for a name this package does not implement. A
-	// condition with an unknown operator never holds, so its statement
-	// never applies: the request is not allowed by an Allow statement with
-	// it, and not denied by a Deny statement with it.
-	known    bool
 	set      setOp
 	ifExists bool
 	base     baseOp
 }
 
-// parseOperator parses a condition operator name. Names are matched
-// exactly, as the operators page spells them.
+// parseOperator parses a condition operator name, and reports false for a
+// name this package does not implement. Names are matched exactly, as the
+// operators page spells them.
 //
 // "You can add IfExists to the end of any condition operator name except
 // the Null condition" (operators page, "...IfExists condition operators").
 // ForAllValues: and ForAnyValue: qualify any operator but Null, which tests
 // whether a key is present rather than its values.
-func parseOperator(name string) operator {
+func parseOperator(name string) (operator, bool) {
 	op := operator{}
 	rest := name
 	if r, ok := strings.CutPrefix(rest, "ForAllValues:"); ok {
@@ -144,10 +140,10 @@ func parseOperator(name string) operator {
 		op.ifExists = true
 	}
 	if !ok || (base.kind == kindNull && op.set != setNone) {
-		return operator{}
+		return operator{}, false
 	}
-	op.known, op.base = true, base
-	return op
+	op.base = base
+	return op, true
 }
 
 // condition is one condition key under one operator, with its policy
@@ -178,10 +174,13 @@ type condition struct {
 // or if the context key value resolves to a null dataset, such as an empty
 // string."
 //
-// A request value or policy value that is not valid for the operator, such
-// as "abc" for a Numeric operator, makes the condition false whether or
-// not the operator is negated, so a malformed value never satisfies a
-// condition.
+// A request value that is not valid for the operator, such as "abc" for a
+// Numeric operator, makes the condition false whether or not the operator
+// is negated, so a malformed value never satisfies a condition. Parse has
+// already rejected policy values that cannot be valid for their operator;
+// one can still turn invalid here only through a policy variable, whose
+// value comes from the request, and it then makes the condition false the
+// same way.
 func (c condition) holds(vars bool, rc *requestContext) bool {
 	vals, present, decided, result := c.precheck(rc)
 	if decided {
@@ -205,12 +204,9 @@ func (c condition) holds(vars bool, rc *requestContext) bool {
 	return c.combine(hits)
 }
 
-// precheck looks up the condition's key and decides the conditions that do
-// not need its values: an unknown operator and Null.
+// precheck looks up the condition's key and decides the Null operator,
+// which does not need the key's values.
 func (c condition) precheck(rc *requestContext) (vals []string, present, decided, result bool) {
-	if !c.op.known {
-		return nil, false, true, false
-	}
 	vals, present = rc.get(c.key)
 	if c.op.base.kind == kindNull {
 		return nil, false, true, nullHolds(c.values, present)

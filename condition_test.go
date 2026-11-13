@@ -1,6 +1,9 @@
 package policy
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // Operator semantics beyond the documented tables: each row follows from
 // the operator definitions cited in condition.go and values.go.
@@ -85,7 +88,6 @@ var operatorCases = []condCase{
 		false,
 	},
 	{"Numeric hex rejected", `{"NumericEquals":{"k:n":"16"}}`, ctx("k:n", "0x10"), false},
-	{"Numeric bad policy value", `{"NumericNotEquals":{"k:n":"ten"}}`, ctx("k:n", "1"), false},
 	// Date.
 	{
 		"Date before", `{"DateLessThan":{"aws:CurrentTime":"2026-12-01T00:00:00Z"}}`,
@@ -210,12 +212,19 @@ var operatorCases = []condCase{
 		ctx("aws:SourceArn", "arn:aws:s3:::b-1"),
 		true,
 	},
-	// Unknown operators never hold.
-	{"unknown operator", `{"StringEqualz":{"k:a":"x"}}`, ctx("k:a", "x"), false},
-	{"unknown negated-looking operator", `{"StringNotEqualz":{"k:a":"x"}}`, ctx(), false},
-	{"Null IfExists", `{"NullIfExists":{"k:a":"true"}}`, ctx(), false},
-	{"set operator on Null", `{"ForAnyValue:Null":{"k:a":"true"}}`, ctx(), false},
-	{"operator case", `{"stringequals":{"k:a":"x"}}`, ctx("k:a", "x"), false},
+	// A Bool or ARN value holding a variable is checked per request: a
+	// value that is not a boolean or an ARN makes the condition false.
+	{
+		"Bool variable not a boolean",
+		`{"Bool":{"k:b":"${k:v}"}}`,
+		ctx("k:b", "true", "k:v", "maybe"),
+		false,
+	},
+	{"Bool variable", `{"Bool":{"k:b":"${k:v}"}}`, ctx("k:b", "true", "k:v", "TRUE"), true},
+	{
+		"ArnNotLike variable not an arn", `{"ArnNotLike":{"k:arn":"${k:v}"}}`,
+		ctx("k:arn", "arn:aws:s3:::b", "k:v", "b"), false,
+	},
 }
 
 var variableConditionCases = []condCase{
@@ -246,12 +255,6 @@ var variableConditionCases = []condCase{
 		true,
 	},
 	{
-		"variables not in Numeric",
-		`{"NumericEquals":{"k:n":"${k:m}"}}`,
-		ctx("k:n", "1", "k:m", "1"),
-		false,
-	},
-	{
 		"variable in ArnEquals", `{"ArnEquals":{"k:arn":"${aws:PrincipalArn}"}}`,
 		ctx("k:arn", "arn:aws:iam::111122223333:user/alice"), true,
 	},
@@ -269,13 +272,13 @@ func TestOperators(t *testing.T) {
 	t.Run("variables", func(t *testing.T) { runCondCases(t, variableConditionCases) })
 }
 
-// An unknown operator makes a Deny statement not apply either, so it
-// denies nothing.
-func TestUnknownOperatorDenyDoesNotApply(t *testing.T) {
-	allow := mustParse(t, allowAll)
-	deny := mustParse(t, condPolicy("Deny", `{"StringEqualz":{"k:a":"x"}}`))
-	if got := Evaluate(anyRequest(ctx("k:a", "x")), allow, deny); got.Decision != Allow {
-		t.Errorf("Evaluate = %+v, want Allow", got)
+// A Deny statement with an unknown operator is refused at Parse, so it
+// cannot silently deny nothing.
+func TestUnknownOperatorDenyRejected(t *testing.T) {
+	_, err := Parse([]byte(condPolicy("Deny", `{"StringEqualz":{"k:a":"x"}}`)))
+	var pe *ParseError
+	if !errors.As(err, &pe) || pe.Message != "Condition operator StringEqualz is not valid." {
+		t.Errorf("Parse = %v, want the unknown operator refused", err)
 	}
 }
 

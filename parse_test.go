@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// cond is a Deny statement on everything under the Condition element c.
+func cond(c string) string {
+	return stmt(`"Effect":"Deny","Action":"*","Resource":"*","Condition":` + c)
+}
+
 func stmt(body string) string {
 	return `{"Version":"2012-10-17","Statement":{` + body + `}}`
 }
@@ -25,8 +30,10 @@ var parseOK = []string{
 		`"Effect":"Allow","Action":"*","Resource":"*","Condition":{"NumericLessThan":{"k:n":10},"Bool":{"k:b":true}}`,
 	),
 	stmt(`"Effect":"Deny","NotPrincipal":{"AWS":"123456789012"},"Action":"s3:*","Resource":"*"`),
-	// Unknown operators parse; they never hold.
-	stmt(`"Effect":"Allow","Action":"*","Resource":"*","Condition":{"NoSuchOperator":{"k:a":"x"}}`),
+	// Variables make Bool and ARN values valid; numbers and booleans may
+	// be JSON literals.
+	stmt(`"Effect":"Allow","Action":"*","Resource":"*","Condition":{"Bool":{"k:b":"${k:v}"},` +
+		`"ArnLike":{"k:a":"${aws:PrincipalArn}"},"NumericEquals":{"k:n":[1,"2.5","-3e2"]},"Null":{"k:x":true}}`),
 }
 
 func TestParseValid(t *testing.T) {
@@ -104,6 +111,62 @@ var parseErrors = []struct{ doc, msg string }{
 		msgNotPrincipalEff,
 	},
 	{stmt(`"Effect":"Deny","Principal":"*","NotPrincipal":"*","Action":"*"`), msgSyntax},
+	{cond(`{"NoSuchOperator":{"k:a":"x"}}`), "Condition operator NoSuchOperator is not valid."},
+	{cond(`{"StringNotEqualz":{"k:a":"x"}}`), "Condition operator StringNotEqualz is not valid."},
+	{cond(`{"stringequals":{"k:a":"x"}}`), "Condition operator stringequals is not valid."},
+	{cond(`{"NullIfExists":{"k:a":"true"}}`), "Condition operator NullIfExists is not valid."},
+	{
+		cond(`{"ForAnyValue:Null":{"k:a":"true"}}`),
+		"Condition operator ForAnyValue:Null is not valid.",
+	},
+	{
+		cond(`{"ForAllValues:StringEqualsIfExist":{"k:a":"x"}}`),
+		"Condition operator ForAllValues:StringEqualsIfExist is not valid.",
+	},
+	{
+		cond(`{"ForEachValue:StringEquals":{"k:a":"x"}}`),
+		"Condition operator ForEachValue:StringEquals is not valid.",
+	},
+	{
+		cond(`{"NumericNotEquals":{"k:n":"ten"}}`),
+		"Condition value ten is not valid for NumericNotEquals.",
+	},
+	{
+		cond(`{"NumericEquals":{"k:n":"${k:m}"}}`),
+		"Condition value ${k:m} is not valid for NumericEquals.",
+	},
+	{
+		cond(`{"NumericEquals":{"k:n":"0x10"}}`),
+		"Condition value 0x10 is not valid for NumericEquals.",
+	},
+	{
+		cond(`{"DateLessThanIfExists":{"aws:CurrentTime":"soon"}}`),
+		"Condition value soon is not valid for DateLessThanIfExists.",
+	},
+	{
+		cond(`{"NotIpAddress":{"aws:SourceIp":"10.0.0.0/33"}}`),
+		"Condition value 10.0.0.0/33 is not valid for NotIpAddress.",
+	},
+	{
+		cond(`{"IpAddress":{"aws:SourceIp":["10.0.0.1","nope"]}}`),
+		"Condition value nope is not valid for IpAddress.",
+	},
+	{
+		cond(`{"BinaryEquals":{"k:b":"not base64!"}}`),
+		"Condition value not base64! is not valid for BinaryEquals.",
+	},
+	{cond(`{"Bool":{"k:b":"yes"}}`), "Condition value yes is not valid for Bool."},
+	{cond(`{"Null":{"k:b":"maybe"}}`), "Condition value maybe is not valid for Null."},
+	{
+		cond(`{"ForAnyValue:ArnNotLike":{"k:a":"arn:aws:s3"}}`),
+		"Condition value arn:aws:s3 is not valid for ForAnyValue:ArnNotLike.",
+	},
+	// Without Version 2012-10-17 a variable is literal text, so it is no
+	// boolean.
+	{
+		`{"Statement":{"Effect":"Deny","Action":"*","Resource":"*","Condition":{"Bool":{"k:b":"${k:v}"}}}}`,
+		"Condition value ${k:v} is not valid for Bool.",
+	},
 	{strings.Repeat("[", 40) + strings.Repeat("]", 40), msgSyntax},
 }
 

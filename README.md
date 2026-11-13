@@ -86,7 +86,7 @@ is `Allow` or `Deny` exactly. Each statement has `Action` or `NotAction`, and
 resource is `*` or an ARN with a vendor without wildcards. A `Sid` is
 alphanumeric and unique in the policy. `NotPrincipal` requires `Deny`.
 Condition values are strings, numbers or booleans, or non-empty arrays of
-them.
+them, valid for their operator (see Conditions).
 
 **Actions** (`reference_policies_elements_action.html`, `..._notaction.html`).
 Case-insensitive, with `*` and `?`.
@@ -138,12 +138,19 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   CIDR, a bare address being /32 (or /128 for IPv6). Binary values are
   base64 on both sides, compared decoded. `ArnLike` checks the six fields
   separately, each with `*` and `?`.
-- **Fail closed.** An unknown operator (including any spelling other than
-  the documented one) makes its condition false, so the statement never
-  applies: an Allow with it allows nothing, and a Deny with it denies
-  nothing. A request or policy value that is invalid for its operator
-  (`"abc"` for a Numeric operator, a non-ARN for an ARN operator) makes the
-  condition false whether or not the operator is negated.
+- **Malformed conditions are refused at Parse.** An unknown operator
+  (including any spelling other than the documented one, and any unknown
+  prefix or suffix combination) is a parse error, as is a policy value that
+  cannot be valid for its operator: not a number for Numeric, not a date for
+  Date, not an address or CIDR for IpAddress, not base64 for BinaryEquals,
+  not `true`/`false` for Bool or Null, not an ARN of six fields for the ARN
+  operators. A Bool or ARN value holding a policy variable is checked only
+  at evaluation. A Deny statement in a parsed policy therefore fails to
+  apply only because the request lacks a key or its values do not match,
+  never because the policy is malformed.
+- A request value that is invalid for its operator (`"abc"` for a Numeric
+  operator, a non-ARN for an ARN operator), or a variable that resolves to
+  one, makes the condition false whether or not the operator is negated.
 
 **Trust policies** (`reference_policies_elements_principal.html`,
 `..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic
@@ -177,8 +184,10 @@ colon.`, `Vendor X is not valid`, `Resource X must be in ARN format or "*".`,
 in policy` is IAM's message as reported by users.
 `Missing required field Effect.` is S3's reported message for the same
 fault. These are this package's own wording: `Statement IDs (SID) must
-contain only alphanumeric characters.` and `NotPrincipal must be used with
-"Effect":"Deny".` (the NotPrincipal page's sentence).
+contain only alphanumeric characters.`, `NotPrincipal must be used with
+"Effect":"Deny".` (the NotPrincipal page's sentence), `Condition operator X
+is not valid.` and `Condition value X is not valid for OPERATOR.`; IAM's
+text for those faults is not documented.
 
 ## Known gaps
 

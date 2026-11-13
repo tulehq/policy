@@ -350,3 +350,32 @@ func parsePrefix(s string) (netip.Prefix, bool) {
 	}
 	return p, true
 }
+
+// checkConditionValue reports whether a policy value can be valid for the
+// operator: a number for Numeric, a date for Date, an address or CIDR for
+// IpAddress, base64 for BinaryEquals, true or false for Bool and Null, and
+// an ARN of six fields for the ARN operators. A Bool or ARN value holding a
+// policy variable (with vars) is accepted, since its value is known only
+// per request. String values are always valid.
+func checkConditionValue(b baseOp, v string, vars bool) bool {
+	if (b.kind == kindBool || b.kind == kindARN) && vars && strings.Contains(v, "${") {
+		return true
+	}
+	check, ok := valueCheckers[b.kind]
+	return !ok || check(v)
+}
+
+// valueCheckers validates policy values by operator family; families
+// without one accept any string.
+var valueCheckers = map[valueKind]func(string) bool{
+	kindNumeric: func(v string) bool { _, ok := parseNumber(v); return ok },
+	kindDate:    func(v string) bool { _, ok := parseDate(v); return ok },
+	kindIP:      func(v string) bool { _, ok := parsePrefix(v); return ok },
+	kindBinary: func(v string) bool {
+		_, err := base64.StdEncoding.DecodeString(v)
+		return err == nil
+	},
+	kindNull: func(v string) bool { _, ok := parseBool(v); return ok },
+	kindBool: func(v string) bool { _, ok := parseBool(v); return ok },
+	kindARN:  func(v string) bool { return strings.Count(v, ":") >= 5 },
+}
