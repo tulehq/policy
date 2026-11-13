@@ -5,7 +5,10 @@ import "strings"
 // requestContext is a request's context keys, looked up case-insensitively,
 // with the principal keys that its principal ARN implies.
 type requestContext struct {
-	values    map[string][]string
+	values map[string][]string
+	// unknown holds the lowercased keys whose values the caller could not
+	// determine (see withUnknown).
+	unknown   map[string]bool
 	principal string
 }
 
@@ -23,6 +26,28 @@ func newRequestContext(principal string, ctx map[string][]string) *requestContex
 		values[lk] = append(values[lk], v...)
 	}
 	return &requestContext{principal: principal, values: values}
+}
+
+// withUnknown marks keys as unknown: the caller could not determine their
+// values, so they are neither present nor absent. A condition that tests
+// an unknown key, or a policy value whose variable names one, resolves
+// against the caller (see condition.holds and statement.matchesResource).
+// Key names match case-insensitively, as context keys do. An unknown key
+// is unknown whatever Context or the principal gives it.
+func (c *requestContext) withUnknown(keys []string) *requestContext {
+	if len(keys) == 0 {
+		return c
+	}
+	c.unknown = make(map[string]bool, len(keys))
+	for _, k := range keys {
+		c.unknown[strings.ToLower(k)] = true
+	}
+	return c
+}
+
+// isUnknown reports whether key was marked unknown.
+func (c *requestContext) isUnknown(key string) bool {
+	return c.unknown[strings.ToLower(key)]
 }
 
 // get returns the values of key and whether the request carries it. A key

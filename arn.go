@@ -117,6 +117,14 @@ func resourcePattern(raw string, vars bool, c *requestContext) (pattern, bool) {
 	return expand(p, rest, vars, c)
 }
 
+// resourceUnknown reports whether a Resource or NotResource entry has a
+// variable naming an unknown key in its resource portion, the only part
+// whose variables are replaced (see resourcePattern).
+func resourceUnknown(raw string, vars bool, c *requestContext) bool {
+	_, rest, _ := splitResource(raw, vars)
+	return mentionsUnknown(rest, vars, c)
+}
+
 // variableEnd returns the length of the ${...} variable that s starts
 // with, or 0. A variable before the fifth colon is not replaced, and its
 // text, wildcard characters included, is literal.

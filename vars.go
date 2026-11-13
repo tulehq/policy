@@ -57,18 +57,52 @@ func resolve(name string, c *requestContext) (string, bool) {
 	case "*", "?", "$":
 		return name, true
 	}
-	key, def, hasDefault := strings.Cut(name, ", '")
-	if hasDefault {
-		if !strings.HasSuffix(def, "'") {
-			key, hasDefault = name, false
-		} else {
-			def = def[:len(def)-1]
-		}
-	}
+	key, def, hasDefault := variableKey(name)
 	if v, ok := c.variable(key); ok {
 		return v, true
 	}
 	return def, hasDefault
+}
+
+// variableKey splits the text inside ${...} into its key and its default
+// value, if it has one.
+func variableKey(name string) (key, def string, hasDefault bool) {
+	key, def, hasDefault = strings.Cut(name, ", '")
+	if !hasDefault {
+		return key, "", false
+	}
+	if !strings.HasSuffix(def, "'") {
+		return name, "", false
+	}
+	return key, def[:len(def)-1], true
+}
+
+// mentionsUnknown reports whether raw holds a policy variable whose key c
+// marks unknown, with vars as in substitute. A default value does not help:
+// the key's value is unknown, not absent, so the default may not apply.
+// "${*}", "${?}" and "${$}" name no key.
+func mentionsUnknown(raw string, vars bool, c *requestContext) bool {
+	if !vars || len(c.unknown) == 0 {
+		return false
+	}
+	for {
+		i := strings.Index(raw, "${")
+		if i < 0 {
+			return false
+		}
+		end := strings.IndexByte(raw[i:], '}')
+		if end < 0 {
+			return false
+		}
+		switch name := raw[i+2 : i+end]; name {
+		case "*", "?", "$":
+		default:
+			if key, _, _ := variableKey(name); c.isUnknown(key) {
+				return true
+			}
+		}
+		raw = raw[i+end+1:]
+	}
 }
 
 // expand appends raw to p with "*" and "?" as wildcards and each variable's
