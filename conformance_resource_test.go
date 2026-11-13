@@ -1023,32 +1023,6 @@ var rpReviewCases = []rpCase{
 		ctx:    cfCtx{"aws:username": {"admin"}},
 		want:   policy.Allow,
 	},
-	{
-		name: "account id principal names the caller's account in any partition",
-		src:  docPrincipal,
-		stated: "CHOICE: an account ID carries no partition, so it is matched by the caller's AccountID " +
-			"alone; matching never depends on the request's resource",
-		resource: rpBucket(
-			"Allow",
-			`"Principal":{"AWS":"`+rpOther+`"}`,
-			"",
-		),
-		identity: []string{rpAllowGet},
-		caller:   rpCN,
-		want:     policy.Allow,
-	},
-	{
-		name:     "root arn principal in another partition",
-		src:      docIdentifiers,
-		stated:   "You cannot delegate access between accounts in different partitions",
-		resource: rpBucket("Allow", `"Principal":{"AWS":"arn:aws:iam::`+rpOther+`:root"}`, ""),
-		identity: []string{
-			rpAllowGet,
-		},
-		caller: rpCN,
-		want:   policy.ImplicitDeny,
-		reason: policy.NoResourceAllow,
-	},
 }
 
 // rpCN is a user of rpOther in the aws-cn partition.
@@ -1109,6 +1083,93 @@ var rpStarResourceCases = []rpCase{
 }
 
 func TestConformanceResourceStarResource(t *testing.T) { rpRun(t, rpStarResourceCases) }
+
+const rpPartitionStated = "You cannot delegate access between accounts in different partitions"
+
+// A caller of another partition than an ARN resource is refused whatever
+// the policies grant; on "*", which has no partition, an account Deny
+// still applies to it.
+var rpPartitionCases = []rpCase{
+	{
+		name:   "aws-cn caller, aws resource, account grant",
+		src:    docIdentifiers,
+		stated: rpPartitionStated,
+		resource: rpBucket(
+			"Allow",
+			`"Principal":{"AWS":"`+rpOther+`"}`,
+			"",
+		),
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		want:     policy.ImplicitDeny,
+		reason:   policy.NoIdentityAllow,
+	},
+	{
+		name:   "aws-cn caller, aws resource, user grant in its account",
+		src:    docIdentifiers,
+		stated: rpPartitionStated,
+		resource: rpBucket(
+			"Allow",
+			`"Principal":{"AWS":"`+rpCN.ARN+`"}`,
+			"",
+		),
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		account:  rpOther,
+		want:     policy.ImplicitDeny,
+		reason:   policy.NoIdentityAllow,
+	},
+	{
+		name:     "aws-cn caller, aws resource, star grant",
+		src:      docIdentifiers,
+		stated:   rpPartitionStated,
+		resource: rpBucket("Allow", `"Principal":"*"`, ""),
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		account:  rpOther,
+		want:     policy.ImplicitDeny,
+		reason:   policy.NoIdentityAllow,
+	},
+	{
+		name:   "control: aws-cn caller, aws-cn resource",
+		src:    docCrossAccount,
+		stated: "AWS allows the request only if both account policy evaluations allow the request",
+		resource: `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":{"AWS":"` + rpOther +
+			`"},"Action":"s3:GetObject","Resource":"arn:aws-cn:s3:::amzn-s3-demo-bucket/*"}}`,
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		res:      "arn:aws-cn:s3:::amzn-s3-demo-bucket/key",
+		want:     policy.Allow,
+	},
+	{
+		name:     "aws-cn caller, account deny on resource star",
+		src:      docEvalDenyAll,
+		stated:   "If the enforcement code finds even one explicit deny that applies ... Deny",
+		resource: rpListDeny(rpOther),
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		action:   "s3:ListAllMyBuckets",
+		res:      "*",
+		want:     policy.ExplicitDeny,
+		reason:   policy.ResourceDeny,
+	},
+	{
+		name:   "aws-cn caller, root arn deny on resource star",
+		src:    docPrincipal,
+		stated: "The account ARN and the shortened account ID behave the same way",
+		resource: rpListDeny(
+			"arn:aws-cn:iam::" + rpOther + ":root",
+		),
+		identity: []string{allowAllIdentity},
+		caller:   rpCN,
+		action:   "s3:ListAllMyBuckets",
+		res:      "*",
+		want:     policy.ExplicitDeny,
+		reason:   policy.ResourceDeny,
+	},
+}
+
+func TestConformanceResourcePartition(t *testing.T) { rpRun(t, rpPartitionCases) }
 
 // ---------------------------------------------------------------------------
 // Principal values at parse

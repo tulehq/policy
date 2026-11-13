@@ -197,13 +197,17 @@ type Authorization struct {
 //     Allow (else NoIdentityAllow) and a resource-based Allow of any kind
 //     (else NoResourceAllow) are both needed.
 //
-// Before any policy is read, two kinds of caller are denied with
+// Before any policy is read, these callers are denied with
 // ImplicitDeny and NoIdentityAllow:
 //
 //   - A Caller whose fields disagree with one another (see Caller.valid),
 //     such as an Account type with a user ARN, or an ARN of another
 //     account than AccountID. Matching and the root rule below rely on
 //     the fields agreeing, so a descriptor that breaks them grants nothing.
+//   - A caller in another partition than the resource, when the resource
+//     is an ARN: "You cannot delegate access between accounts in
+//     different partitions." ("IAM identifiers"). A resource that is not
+//     an ARN, such as "*", has no partition and refuses no caller.
 //   - A session whose role was deleted (Type AssumedRole, empty
 //     PrincipalARN). This package's choice: such a session has no
 //     aws:PrincipalArn, so a Deny keyed on the role's ARN would not apply
@@ -222,7 +226,7 @@ type Authorization struct {
 // statement without a Principal or NotPrincipal, or without a Resource or
 // NotResource, never applies.
 func Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy) Authorization {
-	if !req.Caller.valid() || req.Caller.orphaned() {
+	if !req.Caller.valid() || req.Caller.orphaned() || crossPartition(req.Resource, req.Caller) {
 		none := Result{Decision: ImplicitDeny, Policy: -1}
 		return Authorization{
 			Decision: ImplicitDeny,
@@ -241,6 +245,17 @@ func Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy) Auth
 	out.Decision, out.Reason = decide(id.Decision, res.Decision, direct,
 		isAccountID(req.Caller.AccountID) && req.Caller.AccountID == req.ResourceAccount)
 	return out
+}
+
+// crossPartition reports whether resource is an ARN of another partition
+// than the caller's ARN, which Caller.valid has checked.
+func crossPartition(resource string, c Caller) bool {
+	r, ok := parseARN(resource)
+	if !ok {
+		return false
+	}
+	ca, _ := parseARN(c.ARN)
+	return r.partition != ca.partition
 }
 
 // decide combines the identity-based decision id and the resource-based
