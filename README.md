@@ -148,9 +148,16 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   at evaluation. A Deny statement in a parsed policy therefore fails to
   apply only because the request lacks a key or its values do not match,
   never because the policy is malformed.
-- A request value that is invalid for its operator (`"abc"` for a Numeric
-  operator, a non-ARN for an ARN operator), or a variable that resolves to
-  one, makes the condition false whether or not the operator is negated.
+- **Malformed request values never grant and always deny.** A request
+  value that is invalid for its operator (`"abc"` for a Numeric operator, a
+  non-ARN for an ARN operator) is neither a match nor a non-match: it takes the result
+  worse for the caller. In an Allow statement it never helps the condition
+  hold; in a Deny statement it always counts toward the condition holding.
+  This holds under every operator, plain, negated, `ForAnyValue` and
+  `ForAllValues`, while the key's valid values are compared as usual, so
+  appending a junk value can neither switch a Deny off nor switch an Allow
+  on. A policy value that a variable turns invalid follows the same rule.
+  AWS documents neither case; this is a deliberate choice.
 
 **Trust policies** (`reference_policies_elements_principal.html`,
 `..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic

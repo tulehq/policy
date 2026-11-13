@@ -187,9 +187,13 @@ func (s *statement) matchesResource(resource string, vars bool, rc *requestConte
 // condition operator, the context keys are evaluated using a logical AND."
 // ("Conditions with multiple context keys or values",
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-logic-multiple-context-keys-or-values.html).
+//
+// The statement's effect decides how a malformed request value counts (see
+// condition.holds).
 func (s *statement) conditionsHold(vars bool, rc *requestContext) bool {
+	deny := s.effect == effectDeny
 	for _, c := range s.conditions {
-		if !c.holds(vars, rc) {
+		if !c.holds(vars, rc, deny) {
 			return false
 		}
 	}

@@ -85,7 +85,7 @@ var operatorCases = []condCase{
 		"NumericNotEquals not a number",
 		`{"NumericNotEquals":{"k:n":"10"}}`,
 		ctx("k:n", "abc"),
-		false,
+		false, // an invalid value never helps an Allow
 	},
 	{"Numeric hex rejected", `{"NumericEquals":{"k:n":"16"}}`, ctx("k:n", "0x10"), false},
 	// Date.
@@ -296,5 +296,124 @@ func TestDenyNegatedIfExistsMissingKey(t *testing.T) {
 		deny,
 	); got.Decision != ExplicitDeny {
 		t.Errorf("Evaluate = %+v, want ExplicitDeny", got)
+	}
+}
+
+// junkCases: a value invalid for the operator is a non-match for that value
+// alone and never switches a condition off.
+var junkCases = []condCase{
+	{
+		"plain junk then match",
+		`{"NumericGreaterThan":{"k:n":"10"}}`,
+		ctx("k:n", "junk", "k:n", "11"),
+		true,
+	},
+	{"plain only junk", `{"NumericGreaterThan":{"k:n":"10"}}`, ctx("k:n", "junk"), false},
+	{
+		"negated junk and match",
+		`{"NumericNotEquals":{"k:n":"10"}}`,
+		ctx("k:n", "junk", "k:n", "10"),
+		false,
+	},
+	{
+		"ForAnyValue junk then match",
+		`{"ForAnyValue:NumericEquals":{"k:n":"1"}}`,
+		ctx("k:n", "junk", "k:n", "1"),
+		true,
+	},
+	{
+		"ForAnyValue only junk",
+		`{"ForAnyValue:NumericEquals":{"k:n":"1"}}`,
+		ctx("k:n", "junk"),
+		false,
+	},
+	{
+		"ForAnyValue negated only junk",
+		`{"ForAnyValue:NumericNotEquals":{"k:n":"1"}}`,
+		ctx("k:n", "junk"),
+		false,
+	},
+	{
+		"ForAllValues junk",
+		`{"ForAllValues:NumericEquals":{"k:n":"1"}}`,
+		ctx("k:n", "1", "k:n", "junk"),
+		false,
+	},
+	{
+		"ForAllValues negated junk",
+		`{"ForAllValues:NumericNotEquals":{"k:n":"1"}}`,
+		ctx("k:n", "2", "k:n", "junk"),
+		false,
+	},
+	{
+		"ForAllValues valid",
+		`{"ForAllValues:NumericNotEquals":{"k:n":"1"}}`,
+		ctx("k:n", "2", "k:n", "3"),
+		true,
+	},
+}
+
+func TestJunkRequestValues(t *testing.T) { runCondCases(t, junkCases) }
+
+// junkFamilies is one condition per operator family that can see an
+// invalid request value, with that value. String operators have none:
+// every string is valid for them.
+var junkFamilies = []struct{ name, condition, junk string }{
+	{"NumericEquals", `{"NumericEquals":{"k:v":"10"}}`, "ten"},
+	{"NumericNotEquals", `{"NumericNotEquals":{"k:v":"10"}}`, "ten"},
+	{"NumericGreaterThan", `{"NumericGreaterThan":{"k:v":"10"}}`, "ten"},
+	{"DateLessThan", `{"DateLessThan":{"k:v":"2026-01-01"}}`, "soon"},
+	{"DateNotEquals", `{"DateNotEquals":{"k:v":"2026-01-01"}}`, "never"},
+	{"Bool", `{"Bool":{"k:v":"true"}}`, "yes"},
+	{"BinaryEquals", `{"BinaryEquals":{"k:v":"QQ=="}}`, "not base64!"},
+	{"IpAddress", `{"IpAddress":{"k:v":"10.0.0.0/8"}}`, "nope"},
+	{"NotIpAddress", `{"NotIpAddress":{"k:v":"10.0.0.0/8"}}`, "nope"},
+	{"ArnLike", `{"ArnLike":{"k:v":"arn:aws:s3:::*"}}`, "bucket"},
+	{"ArnNotLike", `{"ArnNotLike":{"k:v":"arn:aws:s3:::*"}}`, "bucket"},
+	{"ForAnyValue:NumericEquals", `{"ForAnyValue:NumericEquals":{"k:v":"1"}}`, "x"},
+	{"ForAnyValue:NumericNotEquals", `{"ForAnyValue:NumericNotEquals":{"k:v":"1"}}`, "x"},
+	{"ForAllValues:NumericEquals", `{"ForAllValues:NumericEquals":{"k:v":"1"}}`, "x"},
+	{"ForAllValues:NumericNotEquals", `{"ForAllValues:NumericNotEquals":{"k:v":"1"}}`, "x"},
+	{"NumericEqualsIfExists", `{"NumericEqualsIfExists":{"k:v":"1"}}`, "x"},
+}
+
+// Malformed request values never grant and always deny: a condition whose
+// outcome depends on a junk value never holds in an Allow and always holds
+// in a Deny, whatever the operator.
+func TestJunkNeverGrantsAlwaysDenies(t *testing.T) {
+	allow := mustParse(t, allowAll)
+	for _, f := range junkFamilies {
+		r := anyRequest(ctx("k:v", f.junk))
+		if got := Evaluate(
+			r,
+			mustParse(t, condPolicy("Allow", f.condition)),
+		); got.Decision != ImplicitDeny {
+			t.Errorf("%s Allow on junk: %+v, want ImplicitDeny", f.name, got)
+		}
+		if got := Evaluate(
+			r,
+			allow,
+			mustParse(t, condPolicy("Deny", f.condition)),
+		); got.Decision != ExplicitDeny {
+			t.Errorf("%s Deny on junk: %+v, want ExplicitDeny", f.name, got)
+		}
+	}
+}
+
+// A junk value appended to a multivalued key cannot switch off a Deny.
+func TestJunkValueDoesNotDisableDeny(t *testing.T) {
+	allow := mustParse(t, allowAll)
+	for _, c := range []struct{ name, condition, valid string }{
+		{"NumericGreaterThan over the limit", `{"NumericGreaterThan":{"k:n":"10"}}`, "11"},
+		{"NumericGreaterThan under the limit", `{"NumericGreaterThan":{"k:n":"10"}}`, "9"},
+		{"StringNotEquals", `{"StringNotEquals":{"k:n":"ok"}}`, "other"},
+		{"ForAllValues:NumericEquals", `{"ForAllValues:NumericEquals":{"k:n":"1"}}`, "1"},
+		{"ForAnyValue:NumericNotEquals", `{"ForAnyValue:NumericNotEquals":{"k:n":"1"}}`, "1"},
+	} {
+		deny := mustParse(t, condPolicy("Deny", c.condition))
+		r := anyRequest(ctx("k:n", "junk", "k:n", c.valid))
+		if got := Evaluate(r, allow, deny); got.Decision != ExplicitDeny {
+			t.Errorf("%s: Evaluate = %+v, want ExplicitDeny", c.name, got)
+		}
 	}
 }

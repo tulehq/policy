@@ -107,3 +107,39 @@ func checkResult(t *testing.T, res Result, n int) {
 		t.Fatalf("decision %+v despite an Allow * statement", res)
 	}
 }
+
+// FuzzJunkNeverGrants checks that appending a value invalid for the
+// operator to a request's key never turns a Deny or an implicit deny into an
+// Allow. (A valid appended value may rightly grant, under ForAnyValue.)
+func FuzzJunkNeverGrants(f *testing.F) {
+	f.Add("10", "ten", 0)
+	f.Add("2026-01-01", "9223372036854775807", 4)
+	f.Add("10.0.0.1", "nope", 8)
+	f.Fuzz(func(t *testing.T, valid, junk string, family int) {
+		if family < 0 {
+			family = -family
+		}
+		fam := junkFamilies[family%len(junkFamilies)]
+		if !isJunk(fam.name, junk) {
+			return
+		}
+		allow := mustParse(t, condPolicy("Allow", fam.condition))
+		deny := mustParse(t, condPolicy("Deny", fam.condition))
+		before := ctx("k:v", valid)
+		after := ctx("k:v", valid, "k:v", junk)
+		for _, ps := range [][]*Policy{{allow}, {allow, deny}} {
+			b, a := Evaluate(anyRequest(before), ps...), Evaluate(anyRequest(after), ps...)
+			if b.Decision != Allow && a.Decision == Allow {
+				t.Fatalf("%s: appending %q turned %v into Allow", fam.name, junk, b.Decision)
+			}
+		}
+	})
+}
+
+// isJunk reports whether v is invalid for the named operator. The request
+// side accepts exactly the values that checkConditionValue accepts for the
+// families in junkFamilies.
+func isJunk(operator, v string) bool {
+	op, ok := parseOperator(operator)
+	return ok && !checkConditionValue(op.base, v, false)
+}

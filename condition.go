@@ -174,14 +174,24 @@ type condition struct {
 // or if the context key value resolves to a null dataset, such as an empty
 // string."
 //
-// A request value that is not valid for the operator, such as "abc" for a
-// Numeric operator, makes the condition false whether or not the operator
-// is negated, so a malformed value never satisfies a condition. Parse has
-// already rejected policy values that cannot be valid for their operator;
-// one can still turn invalid here only through a policy variable, whose
-// value comes from the request, and it then makes the condition false the
-// same way.
-func (c condition) holds(vars bool, rc *requestContext) bool {
+// Malformed request values never grant and always deny. A request value
+// that is not valid for the operator, such as "abc" for a Numeric
+// operator, is neither a match nor a non-match: it takes whichever result
+// is worse for the caller. In an Allow statement (deny false) it never
+// helps the condition hold; in a Deny statement (deny true) it always
+// counts toward the condition holding. Because every operator's result
+// only rises or only falls as one value's match does, setting the value to
+// the operator's negation for Allow, and its opposite for Deny, gives that
+// worst case under every operator, plain, negated, ForAnyValue or
+// ForAllValues. The key's other, valid values are compared as usual, so
+// appending a junk value can neither switch a Deny off nor switch an Allow
+// on. AWS documents neither case; this is a deliberate choice.
+//
+// Parse has already rejected policy values that cannot be valid for their
+// operator. One can still turn invalid here only through a policy variable,
+// whose value comes from the request, and the condition then holds only in
+// a Deny statement, by the same rule.
+func (c condition) holds(vars bool, rc *requestContext, deny bool) bool {
 	vals, present, decided, result := c.precheck(rc)
 	if decided {
 		return result
@@ -191,13 +201,13 @@ func (c condition) holds(vars bool, rc *requestContext) bool {
 	}
 	match, ok := compileValues(c.op.base, c.values, vars && c.op.base.vars(), rc)
 	if !ok {
-		return false
+		return deny
 	}
 	hits := make([]bool, len(vals))
 	for i, v := range vals {
 		hit, valid := match(v)
 		if !valid {
-			return false
+			hit = c.op.base.negated != deny
 		}
 		hits[i] = hit
 	}
@@ -247,27 +257,22 @@ func (c condition) combine(hits []bool) bool {
 	neg := c.op.base.negated
 	switch c.op.set {
 	case setForAll:
-		for _, h := range hits {
-			if h == neg {
-				return false
-			}
-		}
-		return true
+		return !anyBool(hits, neg)
 	case setForAny:
-		for _, h := range hits {
-			if h != neg {
-				return true
-			}
-		}
-		return false
+		return anyBool(hits, !neg)
 	default:
-		for _, h := range hits {
-			if h {
-				return !neg
-			}
-		}
-		return neg
+		return anyBool(hits, true) != neg
 	}
+}
+
+// anyBool reports whether any of bs equals want.
+func anyBool(bs []bool, want bool) bool {
+	for _, b := range bs {
+		if b == want {
+			return true
+		}
+	}
+	return false
 }
 
 // nullHolds evaluates the Null operator: "use either true (the key doesn't
