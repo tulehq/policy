@@ -96,6 +96,11 @@ func resourcePattern(raw string, vars bool, c *requestContext) (pattern, bool) {
 	}
 	p := make(pattern, 0, len(raw))
 	for i := 0; i < len(prefix); {
+		if end := variableEnd(prefix[i:], vars); end > 0 {
+			p = p.literal(prefix[i : i+end])
+			i += end
+			continue
+		}
 		r, n := utf8.DecodeRuneInString(prefix[i:])
 		i += n
 		p = p.add(prefixToken(r, i == len(prefix) || prefix[i] == ':'))
@@ -104,6 +109,16 @@ func resourcePattern(raw string, vars bool, c *requestContext) (pattern, bool) {
 		return p, true
 	}
 	return expand(p, rest, vars, c)
+}
+
+// variableEnd returns the length of the ${...} variable that s starts
+// with, or 0. A variable before the fifth colon is not replaced, and its
+// text, wildcard characters included, is literal.
+func variableEnd(s string, vars bool) int {
+	if !vars || !strings.HasPrefix(s, "${") {
+		return 0
+	}
+	return strings.IndexByte(s, '}') + 1
 }
 
 // prefixToken compiles a rune of the first five fields of a Resource ARN;

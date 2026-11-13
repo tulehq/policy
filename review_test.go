@@ -186,3 +186,18 @@ func TestSetOperatorsDropEmptyValues(t *testing.T) {
 		t.Errorf("ForAnyValue matched an empty string: %+v", got)
 	}
 }
+
+// A variable before a Resource's fifth colon is not replaced, and its text
+// is literal: the * of ${*} there is not a wildcard.
+func TestResourcePrefixVariableIsLiteral(t *testing.T) {
+	deny := `{"Version":"2012-10-17","Statement":{"Effect":"Deny","Action":"*","Resource":"arn:aws:s3:${*}::b"}}`
+	ps := []*Policy{mustParse(t, allowAll), mustParse(t, deny)}
+	if got := Evaluate(req("s3:GetObject", "arn:aws:s3:${xyz}::b"), ps...); got.Decision != Allow {
+		t.Errorf("wildcard inside ${...}: %+v, want Allow", got)
+	}
+	if got := Evaluate(
+		req("s3:GetObject", "arn:aws:s3:${*}::b"),
+		ps...); got.Decision != ExplicitDeny {
+		t.Errorf("literal ${*}: %+v, want ExplicitDeny", got)
+	}
+}
