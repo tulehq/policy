@@ -37,6 +37,9 @@ const (
 	msgPrincipal       = "Invalid principal in policy"
 	msgNotPrincipalEff = "NotPrincipal must be used with \"Effect\":\"Deny\"."
 	msgOperator        = "Condition operator %s is not valid."
+	msgHasPrincipal    = "Policy document should not specify a principal."
+	msgNoPrincipal     = "Missing required field Principal."
+	msgProhibited      = "Has prohibited field %s"
 	msgConditionValue  = "Condition value %s is not valid for %s."
 )
 
@@ -87,15 +90,22 @@ type statement struct {
 	hasResource bool
 }
 
-// Parse parses an IAM policy document: an identity-based policy, or a role
-// trust policy with Principal elements. The grammar is the IAM User
-// Guide's "Grammar of the IAM JSON policy language"
+// Parse parses an IAM policy document of either kind, identity-based or
+// role trust, without enforcing either kind's element rules: a statement
+// may have a Principal or not, and needs a Resource only when it has no
+// Principal or NotPrincipal. ParseIdentity and ParseTrust enforce the rules
+// of one kind. The grammar is the IAM User Guide's "Grammar of the IAM
+// JSON policy language"
 // (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_grammar.html)
 // and its element reference
 // (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements.html).
 // Element names are matched exactly. A rejected document returns a
 // *ParseError. Parse applies no size limit; that is the caller's.
-func Parse(doc []byte) (*Policy, error) {
+func Parse(doc []byte) (*Policy, error) { return parse(doc, false) }
+
+// parse parses doc; trust lets a statement omit Resource even without a
+// Principal, so that ParseTrust can report the missing Principal instead.
+func parse(doc []byte, trust bool) (*Policy, error) {
 	v, err := decodeJSON(doc)
 	if err != nil {
 		return nil, parseErr(msgSyntax)
@@ -109,8 +119,57 @@ func Parse(doc []byte) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.statements, err = parseStatements(stmts, p.vars); err != nil {
+	if p.statements, err = parseStatements(stmts, p.vars, trust); err != nil {
 		return nil, err
+	}
+	return p, nil
+}
+
+// ParseIdentity parses an identity-based policy: Parse, and no statement
+// may have a Principal or NotPrincipal ("You cannot use the Principal
+// element in an identity-based policy."; "AWS JSON policy elements:
+// Principal",
+// https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html;
+// "You cannot use the NotPrincipal element in an IAM identity-based
+// policy"; "AWS JSON policy elements: NotPrincipal"). Each statement then
+// needs a Resource or NotResource, as Parse already requires of a statement
+// without a Principal.
+func ParseIdentity(doc []byte) (*Policy, error) {
+	p, err := Parse(doc)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range p.statements {
+		if s.principal != nil {
+			return nil, parseErr(msgHasPrincipal)
+		}
+	}
+	return p, nil
+}
+
+// ParseTrust parses a role trust policy: Parse, and every statement needs
+// a Principal and may have no Resource, NotResource or NotPrincipal. "In
+// IAM roles, use the Principal element in the role trust policy to specify
+// who can assume the role." (Principal page); "You cannot use the
+// NotPrincipal element in an IAM identity-based policy nor in an IAM role
+// trust policy." (NotPrincipal page). A trust policy names no resource: it
+// is attached to the role it governs.
+func ParseTrust(doc []byte) (*Policy, error) {
+	p, err := parse(doc, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range p.statements {
+		switch {
+		case s.principal == nil:
+			return nil, parseErr(msgNoPrincipal)
+		case s.notPrincipal:
+			return nil, parseErr(msgProhibited, "NotPrincipal")
+		case s.hasResource && s.notResource:
+			return nil, parseErr(msgProhibited, "NotResource")
+		case s.hasResource:
+			return nil, parseErr(msgProhibited, "Resource")
+		}
 	}
 	return p, nil
 }
@@ -165,7 +224,7 @@ func parseVersion(v any) (bool, error) {
 // non-empty array of them. The grammar gives an array; the element
 // reference's examples and the IAM User Guide's own policies also use a
 // single object.
-func parseStatements(v any, vars bool) ([]statement, error) {
+func parseStatements(v any, vars, trust bool) ([]statement, error) {
 	list, isList := v.([]any)
 	if !isList {
 		list = []any{v}
@@ -180,7 +239,7 @@ func parseStatements(v any, vars bool) ([]statement, error) {
 		if !ok {
 			return nil, parseErr(msgSyntax)
 		}
-		s, err := parseStatement(obj, vars)
+		s, err := parseStatement(obj, vars, trust)
 		if err != nil {
 			return nil, err
 		}
@@ -200,6 +259,8 @@ type rawStatement struct {
 	fields map[string]any
 	// vars is whether the policy's Version replaces policy variables.
 	vars bool
+	// trust is whether the document is parsed as a trust policy.
+	trust bool
 }
 
 func (r rawStatement) get(name string) (any, bool) {
@@ -228,8 +289,8 @@ var statementElements = map[string]bool{
 	"Condition": true,
 }
 
-func parseStatement(obj object, vars bool) (statement, error) {
-	raw := rawStatement{fields: make(map[string]any, len(obj)), vars: vars}
+func parseStatement(obj object, vars, trust bool) (statement, error) {
+	raw := rawStatement{fields: make(map[string]any, len(obj)), vars: vars, trust: trust}
 	for _, m := range obj {
 		if !statementElements[m.name] {
 			return statement{}, parseErr(msgSyntax)
@@ -367,7 +428,7 @@ func parseResourceElement(s *statement, r rawStatement) error {
 		return err
 	}
 	if !present {
-		if s.principal == nil {
+		if s.principal == nil && !r.trust {
 			return parseErr(msgNoResources)
 		}
 		return nil

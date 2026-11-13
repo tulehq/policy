@@ -91,8 +91,21 @@ func checkPrincipalIDs(typ string, ids []string) (all, ok bool) {
 	return all, true
 }
 
-// matches reports whether the element names the caller. Values match as
-// follows:
+// matchKind is how a Principal element names a caller.
+type matchKind uint8
+
+const (
+	matchNone matchKind = iota
+	// matchAccount: only through the caller's account, by an account ID or
+	// the account's root ARN.
+	matchAccount
+	// matchDirect: by "*", or by the caller's own user, role or role
+	// session ARN, or service, federated or canonical user identifier.
+	matchDirect
+)
+
+// matches reports how the element names the caller, the closest match of
+// all its values. Values match as follows:
 //
 //   - "*" matches every caller.
 //   - An AWS account ID, or the account's root ARN
@@ -112,18 +125,34 @@ func checkPrincipalIDs(typ string, ids []string) (all, ok bool) {
 //     user ARN, or a Service, Federated or CanonicalUser value, matches a
 //     caller with exactly that identifier. "In a Principal element, the user
 //     name part of the Amazon Resource Name (ARN) is case sensitive."
-func (p *principals) matches(caller string, rc *requestContext) bool {
+func (p *principals) matches(caller string, rc *requestContext) matchKind {
 	if p.all {
-		return true
+		return matchDirect
 	}
+	best := matchNone
 	for typ, ids := range p.byType {
 		for _, id := range ids {
-			if id == caller || typ == "AWS" && awsPrincipalMatches(id, caller, rc) {
-				return true
-			}
+			best = max(best, principalMatch(typ, id, caller, rc))
 		}
 	}
-	return false
+	return best
+}
+
+func principalMatch(typ, id, caller string, rc *requestContext) matchKind {
+	switch {
+	case typ == "AWS" && (isAccountID(id) || isRootARN(id)):
+		if id == caller || awsPrincipalMatches(id, caller, rc) {
+			return matchAccount
+		}
+	case id == caller || typ == "AWS" && awsPrincipalMatches(id, caller, rc):
+		return matchDirect
+	}
+	return matchNone
+}
+
+func isRootARN(id string) bool {
+	a, ok := parseARN(id)
+	return ok && a.isRoot()
 }
 
 func awsPrincipalMatches(id, caller string, rc *requestContext) bool {

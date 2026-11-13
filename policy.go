@@ -110,9 +110,26 @@ func Evaluate(req Request, policies ...*Policy) Result {
 	return allow
 }
 
-// AllowsPrincipal reports whether the role trust policy trust lets the
-// caller principalARN perform action (such as "sts:AssumeRole") on the
-// role it is attached to, given the request's context keys ctx.
+// TrustResult is the decision of a role trust policy for one caller.
+//
+//nolint:govet // fieldalignment: the field order is the published API.
+type TrustResult struct {
+	Decision Decision
+	// Direct is true for an Allow when an allowing statement named the
+	// caller other than through its account: by "*", or by its own user,
+	// role or role-session ARN (or service, federated or canonical user
+	// identifier). It is false when every allowing statement named the
+	// caller only by its account ID or the account's root ARN.
+	Direct bool
+	// Sid is the deciding statement's Sid: the Deny that applies, or for
+	// an Allow the first direct allowing statement, else the first
+	// allowing statement.
+	Sid string
+}
+
+// TrustMatch evaluates the role trust policy trust for the caller
+// principalARN performing action (such as "sts:AssumeRole") on the role it
+// is attached to, given the request's context keys ctx.
 //
 // A statement applies when its Action or NotAction matches, its Principal
 // names the caller (or its NotPrincipal does not), and all of its
@@ -120,28 +137,61 @@ func Evaluate(req Request, policies ...*Policy) Result {
 // statement without a Principal or NotPrincipal applies to no caller, and
 // Resource is ignored: a trust policy's resource is the role. As in
 // Evaluate, a Deny that applies wins, else an Allow that applies allows.
-func AllowsPrincipal(trust *Policy, action, principalARN string, ctx map[string][]string) bool {
+//
+// Direct matters because AWS treats the two kinds of grant differently:
+// "If a resource-based policy grants permission directly to the IAM user
+// or the session principal that is making the request, then an implicit
+// deny in an identity-based policy, a permissions boundary, or a session
+// policy does not impact the final decision", while an account principal
+// "delegates authority to the account", whose administrator "must then
+// grant access to an identity" ("How AWS enforcement code logic evaluates
+// requests to allow or deny access",
+// https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html,
+// and "AWS JSON policy elements: Principal"). So within the account a
+// direct Allow suffices, and an account-only Allow also needs an identity
+// policy that allows the action. Applying that is the caller's.
+func TrustMatch(trust *Policy, action, principalARN string, ctx map[string][]string) TrustResult {
+	res := TrustResult{Decision: ImplicitDeny}
 	if trust == nil {
-		return false
+		return res
 	}
 	rc := newRequestContext(principalARN, ctx)
-	allowed := false
 	for _, s := range trust.statements {
-		if !s.trusts(action, principalARN, trust.vars, rc) {
+		kind, applies := s.trusts(action, principalARN, trust.vars, rc)
+		if !applies {
 			continue
 		}
 		if s.effect == effectDeny {
-			return false
+			return TrustResult{Decision: ExplicitDeny, Sid: s.sid}
 		}
-		allowed = true
+		direct := kind == matchDirect
+		if res.Decision == ImplicitDeny || direct && !res.Direct {
+			res = TrustResult{Decision: Allow, Direct: direct, Sid: s.sid}
+		}
 	}
-	return allowed
+	return res
 }
 
-// trusts reports whether a trust policy statement applies to the caller.
-func (s *statement) trusts(action, caller string, vars bool, rc *requestContext) bool {
-	return s.principal != nil && s.matchesAction(action) &&
-		s.principal.matches(caller, rc) != s.notPrincipal && s.conditionsHold(vars, rc)
+// AllowsPrincipal reports whether TrustMatch allows the caller, directly
+// or through its account.
+func AllowsPrincipal(trust *Policy, action, principalARN string, ctx map[string][]string) bool {
+	return TrustMatch(trust, action, principalARN, ctx).Decision == Allow
+}
+
+// trusts reports whether a trust policy statement applies to the caller,
+// and how its Principal named the caller (matchNone under NotPrincipal).
+func (s *statement) trusts(action, caller string, vars bool, rc *requestContext) (matchKind, bool) {
+	if s.principal == nil || !s.matchesAction(action) {
+		return matchNone, false
+	}
+	kind := s.principal.matches(caller, rc)
+	if (kind != matchNone) == s.notPrincipal || !s.conditionsHold(vars, rc) {
+		return matchNone, false
+	}
+	if s.notPrincipal {
+		return matchNone, true
+	}
+	return kind, true
 }
 
 // matchesAction: action names are case-insensitive ("The prefix and the

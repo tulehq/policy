@@ -44,9 +44,17 @@ ok := policy.AllowsPrincipal(trust, "sts:AssumeRole", callerARN, ctx)
 
 ## API
 
-- `Parse(doc []byte) (*Policy, error)` parses an identity-based policy or a
-  role trust policy. A `*Policy` is immutable and safe for concurrent use.
-  Size limits are the caller's to apply.
+- `ParseIdentity(doc []byte) (*Policy, error)` parses an identity-based
+  policy: no statement may have `Principal` or `NotPrincipal`, and each needs
+  `Resource` or `NotResource`.
+- `ParseTrust(doc []byte) (*Policy, error)` parses a role trust policy: each
+  statement needs `Principal`, and may have no `Resource`, `NotResource` or
+  `NotPrincipal`.
+- `Parse(doc []byte) (*Policy, error)` is the lenient, kind-agnostic form:
+  it checks the grammar of both kinds without either kind's element rules
+  (a statement needs a `Resource` only when it has no `Principal`).
+- A `*Policy` is immutable and safe for concurrent use. Size limits are the
+  caller's to apply.
 - `Request{Action, Resource, Principal string; Context map[string][]string}`.
   `Principal` is the caller's ARN. Context keys are matched
   case-insensitively.
@@ -57,8 +65,12 @@ ok := policy.AllowsPrincipal(trust, "sts:AssumeRole", callerARN, ctx)
   implicit deny; `Sid` is the deciding statement's Sid.
 - `Evaluate(req Request, policies ...*Policy) Result`. Nil policies are
   skipped.
+- `TrustMatch(trust *Policy, action, principalARN string, ctx
+  map[string][]string) TrustResult`, with `TrustResult{Decision Decision;
+  Direct bool; Sid string}`. `Direct` is true when an allowing statement
+  named the caller other than through its account.
 - `AllowsPrincipal(trust *Policy, action, principalARN string, ctx
-  map[string][]string) bool`.
+  map[string][]string) bool` is `TrustMatch(...).Decision == Allow`.
 - `ParseError{Message string}`, returned by `Parse` as `*ParseError`.
 
 ## Semantics and sources
@@ -172,6 +184,17 @@ whose `aws:PrincipalArn` is that ARN. Other values (user, session,
 federated-user ARNs, `Service`, `Federated`, `CanonicalUser`) match exactly.
 Partial wildcards in principals are rejected.
 
+`TrustMatch` also reports whether the Allow is direct: by `"*"`, or by the
+caller's own user, role or role-session ARN (or service, federated or
+canonical user identifier), rather than only by an account ID or root ARN.
+Its `Sid` is the first direct allowing statement's, else the first allowing
+statement's. AWS lets a direct grant in a resource-based policy stand
+without an identity Allow within the account, while an account grant
+delegates to the account's own policies ("How AWS enforcement code logic
+evaluates requests to allow or deny access",
+`reference_policies_evaluation-logic_policy-eval-denyallow.html`); applying
+that rule is the caller's.
+
 **Matching cost.** Wildcard patterns are matched by simulating the pattern
 as an automaton, in O(pattern × input) time and O(pattern) space whatever
 the number of wildcards; no input backtracks exponentially.
@@ -189,7 +212,11 @@ a vendor, e.g., iam, sdb, ec2, etc.`, `Actions/Condition can contain only one
 colon.`, `Vendor X is not valid`, `Resource X must be in ARN format or "*".`,
 `Resource vendor must be fully qualified and cannot contain regexes.` and
 `Statement IDs (SID) in a single policy must be unique.` `Invalid principal
-in policy` is IAM's message as reported by users.
+in policy`, `Policy document should not specify a principal.` and `Has
+prohibited field Resource` are IAM's messages as reported by users; this
+package uses the last form for `NotResource` and `NotPrincipal` in a trust
+policy too. `Missing required field Principal.` follows the form of the
+reported `Missing required field Effect.`
 `Missing required field Effect.` is S3's reported message for the same
 fault. These are this package's own wording: `Statement IDs (SID) must
 contain only alphanumeric characters.`, `NotPrincipal must be used with
@@ -207,9 +234,9 @@ text for those faults is not documented.
   `Resource: "*"` covers every action of every service.
 - Element names are matched case-sensitively and operator names exactly; the
   User Guide does not say whether IAM accepts other casings.
-- `Id` is accepted in any policy, though the grammar notes say an
-  identity-based policy must not have one. `Principal` is accepted in any
-  policy; the caller rejects it in identity policies if it must.
+- `Id` is accepted in any policy, `ParseIdentity` included, though the
+  grammar notes say an identity-based policy must not have one; IAM's
+  message for it is not known.
 - Empty value arrays in `Condition` are rejected; IAM's handling is not
   documented.
 - IAM's per-service ARN checks (no region in an IAM or S3 ARN, IAM resource
