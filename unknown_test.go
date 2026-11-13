@@ -82,7 +82,9 @@ func TestUnknownKeyEveryOperator(t *testing.T) {
 }
 
 // Marking a key unknown changes nothing for a condition on another key,
-// and an empty Unknown changes nothing at all.
+// and an empty Unknown changes nothing at all. A name ending in "/" marks
+// a family, so a family that does not prefix the key changes nothing
+// either.
 func TestUnknownOtherKeyUnchanged(t *testing.T) {
 	allow := mustParse(t, allowAll)
 	for _, name := range unknownOperators() {
@@ -99,7 +101,7 @@ func TestUnknownOtherKeyUnchanged(t *testing.T) {
 			{allow, mustParse(t, condPolicy("Deny", cond))},
 		} {
 			want := Evaluate(anyRequest(c), ps...)
-			for _, unknown := range [][]string{{}, {"k:other"}, {"k:v2"}} {
+			for _, unknown := range [][]string{{}, {"k:other"}, {"k:v2"}, {"k:v/"}, {"k:"}, {" k:v"}, {"k:v "}, {"k:*"}} {
 				r := anyRequest(c)
 				r.Unknown = unknown
 				if got := Evaluate(r, ps...); got != want {
@@ -142,10 +144,11 @@ const varObject = "arn:aws:s3:::b/o-1/k"
 
 var varContext = ctx("k:v", "o-1", orgID, "o-1")
 
-// unknownVarCases: a policy variable naming an unknown key resolves its
-// element against the caller: the condition or the Resource element never
-// matches in an Allow and always matches in a Deny, a default value
-// notwithstanding. Variables that are not replaced (outside an ARN's
+// unknownVarCases: a policy variable naming an unknown key resolves
+// against the caller, a default value notwithstanding. A condition never
+// holds in an Allow and always holds in a Deny. A Resource or NotResource
+// entry is dropped or counts as "*", whichever keeps an Allow from
+// applying and makes a Deny apply; the other entries match as usual. Variables that are not replaced (outside an ARN's
 // resource portion, in a 2008 policy) are literal text and unaffected.
 var unknownVarCases = []unknownVarCase{
 	{"Allow condition", varAllow(`"Resource":"*",` +
@@ -176,7 +179,32 @@ var unknownVarCases = []unknownVarCase{
 	{
 		"Allow Resource, another entry matches", varAllow(
 			`"Resource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::b/*"]}`),
+		varObject, varContext, Allow,
+	},
+	{
+		"Allow Resource, another entry does not match", varAllow(
+			`"Resource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::c/*"]}`),
 		varObject, varContext, ImplicitDeny,
+	},
+	{
+		"Allow NotResource, another entry excludes nothing", varAllow(
+			`"NotResource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::c/*"]}`),
+		"arn:aws:s3:::other/k", varContext, ImplicitDeny,
+	},
+	{
+		"Deny Resource, another entry does not match", varDeny(
+			`"Resource":["arn:aws:s3:::c/*","arn:aws:s3:::b/${aws:PrincipalOrgID}/*"]`),
+		"arn:aws:s3:::other/k", varContext, ExplicitDeny,
+	},
+	{
+		"Deny NotResource, another entry excludes", varDeny(
+			`"NotResource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::b/*"]`),
+		varObject, varContext, Allow,
+	},
+	{
+		"Deny NotResource, another entry does not exclude", varDeny(
+			`"NotResource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::c/*"]`),
+		varObject, varContext, ExplicitDeny,
 	},
 	{
 		"Allow NotResource",
@@ -353,5 +381,56 @@ func checkNoBetter(t *testing.T, what string, before, after Decision) {
 	t.Helper()
 	if rank(after) > rank(before) {
 		t.Fatalf("%s: unknown keys turned %v into %v", what, before, after)
+	}
+}
+
+// A name ending in "/" marks every key it prefixes, in any case; every
+// other name is one exact key, spaces included, and no name is a pattern.
+func TestUnknownFamily(t *testing.T) {
+	allow := mustParse(t, condPolicy("Allow",
+		`{"StringNotEqualsIfExists":{"aws:PrincipalTag/Team":"intern"}}`))
+	deny := mustParse(t, condPolicy("Deny", `{"StringEquals":{"aws:PrincipalTag/team":"intern"}}`))
+	allowAllP := mustParse(t, allowAll)
+	for _, c := range []struct {
+		name    string
+		unknown []string
+		hit     bool
+	}{
+		{"family", []string{"aws:PrincipalTag/"}, true},
+		{"family other case", []string{"AWS:principaltag/"}, true},
+		{"shorter family", []string{"aws:"}, false},
+		{"shorter family with slash", []string{"aws:Principal/"}, false},
+		{"exact key", []string{"aws:principaltag/team"}, true},
+		{"leading space", []string{" aws:PrincipalTag/team"}, false},
+		{"leading space family", []string{" aws:PrincipalTag/"}, false},
+		{"star is not a pattern", []string{"aws:PrincipalTag/*"}, false},
+		{"bare prefix without slash", []string{"aws:PrincipalTag"}, false},
+		{"other family", []string{"aws:RequestTag/"}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := anyRequest(ctx("aws:PrincipalTag/team", "staff"))
+			r.Unknown = c.unknown
+			wantAllow, wantDeny := Allow, Allow
+			if c.hit {
+				wantAllow, wantDeny = ImplicitDeny, ExplicitDeny
+			}
+			if got := Evaluate(r, allow); got.Decision != wantAllow {
+				t.Errorf("Allow: %+v, want %v", got, wantAllow)
+			}
+			if got := Evaluate(r, allowAllP, deny); got.Decision != wantDeny {
+				t.Errorf("Deny: %+v, want %v", got, wantDeny)
+			}
+		})
+	}
+	// A family also covers variables.
+	p := mustParse(t, varAllow(`"Resource":"arn:aws:s3:::b/${aws:PrincipalTag/team}/*"}`))
+	r := anyRequest(ctx("aws:PrincipalTag/team", "staff"))
+	r.Resource = "arn:aws:s3:::b/staff/k"
+	if got := Evaluate(r, p); got.Decision != Allow {
+		t.Fatalf("known tag: %+v, want Allow", got)
+	}
+	r.Unknown = []string{"aws:PrincipalTag/"}
+	if got := Evaluate(r, p); got.Decision != ImplicitDeny {
+		t.Errorf("unknown tag family in a variable: %+v, want ImplicitDeny", got)
 	}
 }

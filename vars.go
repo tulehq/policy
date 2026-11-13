@@ -82,7 +82,7 @@ func variableKey(name string) (key, def string, hasDefault bool) {
 // the key's value is unknown, not absent, so the default may not apply.
 // "${*}", "${?}" and "${$}" name no key.
 func mentionsUnknown(raw string, vars bool, c *requestContext) bool {
-	if !vars || len(c.unknown) == 0 {
+	if !vars || !c.hasUnknown() {
 		return false
 	}
 	for {

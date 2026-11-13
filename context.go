@@ -7,9 +7,11 @@ import "strings"
 type requestContext struct {
 	values map[string][]string
 	// unknown holds the lowercased keys whose values the caller could not
-	// determine (see withUnknown).
+	// determine, and families the lowercased prefixes of key families
+	// marked unknown (see withUnknown).
 	unknown   map[string]bool
 	principal string
+	families  []string
 }
 
 // newRequestContext indexes ctx by lowercased key. Context key names are not
@@ -32,22 +34,47 @@ func newRequestContext(principal string, ctx map[string][]string) *requestContex
 // values, so they are neither present nor absent. A condition that tests
 // an unknown key, or a policy value whose variable names one, resolves
 // against the caller (see condition.holds and statement.matchesResource).
-// Key names match case-insensitively, as context keys do. An unknown key
-// is unknown whatever Context or the principal gives it.
+// Key names match case-insensitively, as context keys do. A name ending
+// in "/", such as "aws:PrincipalTag/", marks a family: every key it
+// prefixes is unknown. Every other name is one exact key name, spaces
+// included; names are not patterns, so "*" names a key "*". An unknown
+// key is unknown whatever Context or the principal gives it.
 func (c *requestContext) withUnknown(keys []string) *requestContext {
 	if len(keys) == 0 {
 		return c
 	}
 	c.unknown = make(map[string]bool, len(keys))
 	for _, k := range keys {
-		c.unknown[strings.ToLower(k)] = true
+		lk := strings.ToLower(k)
+		if strings.HasSuffix(lk, "/") {
+			c.families = append(c.families, lk)
+			continue
+		}
+		c.unknown[lk] = true
 	}
 	return c
 }
 
-// isUnknown reports whether key was marked unknown.
+// hasUnknown reports whether any key or family was marked unknown.
+func (c *requestContext) hasUnknown() bool {
+	return len(c.unknown) > 0 || len(c.families) > 0
+}
+
+// isUnknown reports whether key was marked unknown, by name or by family.
 func (c *requestContext) isUnknown(key string) bool {
-	return c.unknown[strings.ToLower(key)]
+	if !c.hasUnknown() {
+		return false
+	}
+	lk := strings.ToLower(key)
+	if c.unknown[lk] {
+		return true
+	}
+	for _, f := range c.families {
+		if strings.HasPrefix(lk, f) {
+			return true
+		}
+	}
+	return false
 }
 
 // get returns the values of key and whether the request carries it. A key
