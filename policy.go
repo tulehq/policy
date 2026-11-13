@@ -90,15 +90,24 @@ type Result struct {
 // identity statement. A statement without Resource or NotResource applies
 // to no resource. Parse policies for Evaluate with ParseIdentity.
 func Evaluate(req Request, policies ...*Policy) Result {
-	rc := newRequestContext(req.Principal, req.Context)
+	return evaluateIdentity(
+		req.Action,
+		req.Resource,
+		newRequestContext(req.Principal, req.Context),
+		policies,
+	)
+}
+
+// evaluateIdentity is Evaluate for the request context rc.
+func evaluateIdentity(action, resource string, rc *requestContext, policies []*Policy) Result {
 	allow := Result{Decision: ImplicitDeny, Policy: -1}
 	for i, p := range policies {
 		if p == nil {
 			continue
 		}
 		for _, s := range p.statements {
-			if s.principal != nil || !s.matchesAction(req.Action) ||
-				!s.matchesResource(req.Resource, p.vars, rc) ||
+			if s.principal != nil || !s.matchesAction(action) ||
+				!s.matchesResource(resource, p.vars, rc) ||
 				!s.conditionsHold(p.vars, rc) {
 				continue
 			}
