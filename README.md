@@ -99,9 +99,10 @@ if az.Decision != policy.Allow {
   never applies one that lacks a `Principal` or has a `Resource`.
 - A `*Policy` is immutable and safe for concurrent use. Size limits are the
   caller's to apply.
-- `Request{Action, Resource, Principal string; Context map[string][]string}`.
-  `Principal` is the caller's ARN. Context keys are matched
-  case-insensitively.
+- `Request{Action, Resource, Principal string; Context map[string][]string;
+  Unknown []string}`. `Principal` is the caller's ARN. Context keys are
+  matched case-insensitively. `Unknown` names keys whose values the service
+  could not determine (see "Unknown context keys" below).
 - `Decision`: `ImplicitDeny` (the zero value), `Allow`, `ExplicitDeny`, with
   `String()`.
 - `Result{Decision Decision; Policy int; Sid string}`. `Policy` is the index
@@ -115,6 +116,11 @@ if az.Decision != policy.Allow {
   trust policy is attached to. `Direct` is true when the caller is in that
   account and an allowing statement named it other than through its
   account.
+- `EvaluateTrust(trust *Policy, req TrustRequest) TrustResult`, with
+  `TrustRequest{RoleAccount, Action, Principal string; Context
+  map[string][]string; Unknown []string}`, is `TrustMatch` with unknown
+  keys. With `Unknown` empty it returns what `TrustMatch` does for the same
+  arguments.
 - `AllowsPrincipal(trust *Policy, action, principalARN string, ctx
   map[string][]string) bool` is `TrustMatch(...).Decision == Allow`.
 - `ParseResource(doc []byte) (*Policy, error)` parses a resource-based
@@ -147,8 +153,8 @@ if az.Decision != policy.Allow {
   (`"AssumedRole"`). A role session with an empty `PrincipalARN` is a
   session whose role was deleted.
 - `AuthorizeRequest{Action, Resource, ResourceAccount string; Caller Caller;
-  Context map[string][]string}`. `ResourceAccount` is the account ID that
-  owns the resource.
+  Context map[string][]string; Unknown []string}`. `ResourceAccount` is the
+  account ID that owns the resource; `Unknown` is as in `Request`.
 - `Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy)
   Authorization`. `resource` is the resource's resource-based policy, nil
   when it has none; nil identity policies are skipped.
@@ -274,6 +280,60 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   off nor switch an Allow on. A policy value that a variable turns invalid
   follows the same rule. AWS documents neither case; this is a deliberate
   choice.
+
+**Unknown context keys.** A service sometimes cannot determine a key's
+value: identity may be unable to reach the organization service, so
+`aws:PrincipalOrgID` is unknown. Passing such a key as absent fails open:
+an absent key makes `StringNotEquals`, `...IfExists`, `Null` with `true`
+and `ForAllValues` hold, so an Allow written with them grants, and makes
+`StringEquals` and `ForAnyValue` fail, so a Deny written with them stops
+applying. A service names such keys in `Unknown` instead (on `Request`,
+`AuthorizeRequest` or `TrustRequest`), and they resolve against the caller.
+AWS has no such notion; this is this package's choice, in the same spirit
+as malformed request values.
+
+- A condition whose key is unknown never holds in an Allow statement and
+  always holds in a Deny statement, under every operator: plain, negated,
+  `...IfExists`, `Null` (`true` or `false`), `ForAnyValue` and
+  `ForAllValues`.
+- A condition value with a policy variable `${key}` naming an unknown key
+  decides its condition the same way, with or without a default value
+  (`${key, 'default'}`): the key's value is unknown, not absent, so the
+  default may not apply. Only variables that are replaced count: under the
+  String, Bool and ARN operators, in a 2012-10-17 policy.
+- A `Resource` or `NotResource` entry with such a variable in its resource
+  portion (after the fifth colon, where variables are replaced) decides the
+  whole element: the statement's resource never matches in an Allow and
+  always matches in a Deny, whatever the other entries say. A variable
+  elsewhere in the ARN is literal text, as without unknown keys.
+- Names match case-insensitively, as context keys do. An unknown key is
+  unknown whatever `Context` gives it, whatever the principal ARN implies,
+  and in `Authorize` whatever the `Caller` gives it.
+- With `Unknown` empty, or naming only keys the policies do not use,
+  every decision is unchanged.
+
+A whole condition or element resolves against the caller, even when a
+known part of it would decide the same way for any value of the unknown
+key. So the result is never better for the caller than the worst it could
+be had the key been known, and can be worse:
+
+```go
+// Allow, Resource ["arn:aws:s3:::b/${aws:PrincipalOrgID}/*", "arn:aws:s3:::b/*"]:
+// the request on arn:aws:s3:::b/k is not allowed by this statement.
+// Deny, Condition {"StringNotEqualsIfExists": {"aws:PrincipalOrgID": "o-1"}}:
+// the Deny applies, whatever Context says aws:PrincipalOrgID is.
+res := policy.Evaluate(policy.Request{
+	Action:    "s3:GetObject",
+	Resource:  "arn:aws:s3:::b/k",
+	Principal: callerARN,
+	Context:   ctx,
+	Unknown:   []string{"aws:PrincipalOrgID"},
+}, p)
+tr := policy.EvaluateTrust(trust, policy.TrustRequest{
+	RoleAccount: roleAccountID, Action: "sts:AssumeRole", Principal: callerARN,
+	Context: ctx, Unknown: []string{"aws:PrincipalOrgID"},
+})
+```
 
 **Trust policies** (`reference_policies_elements_principal.html`,
 `..._notprincipal.html`). `TrustMatch` applies the same deny-wins logic to
