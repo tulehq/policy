@@ -20,7 +20,7 @@ Go 1.27.4 or later.
 ## Usage
 
 ```go
-p, err := policy.Parse(doc)
+p, err := policy.ParseIdentity(doc) // ParseTrust for a role trust policy
 if err != nil {
 	var pe *policy.ParseError
 	if errors.As(err, &pe) {
@@ -52,7 +52,12 @@ ok := policy.AllowsPrincipal(trust, "sts:AssumeRole", callerARN, ctx)
   `NotPrincipal`.
 - `Parse(doc []byte) (*Policy, error)` is the lenient, kind-agnostic form:
   it checks the grammar of both kinds without either kind's element rules
-  (a statement needs a `Resource` only when it has no `Principal`).
+  (a statement needs a `Resource` only when it has no `Principal`). It is
+  for tools that inspect documents, not for authorization: use
+  `ParseIdentity` for policies passed to `Evaluate` and `ParseTrust` for
+  policies passed to `TrustMatch`. Even so, `Evaluate` never applies a
+  statement that has a `Principal` or `NotPrincipal`, and `TrustMatch`
+  never applies one that lacks a `Principal` or has a `Resource`.
 - A `*Policy` is immutable and safe for concurrent use. Size limits are the
   caller's to apply.
 - `Request{Action, Resource, Principal string; Context map[string][]string}`.
@@ -82,9 +87,9 @@ Pages are in the IAM User Guide, `https://docs.aws.amazon.com/IAM/latest/UserGui
 deny in any policy wins; otherwise any Allow allows; otherwise the request is
 implicitly denied. The deciding statement is the first Deny that applies, in
 policy then statement order, or else the first Allow. A statement applies
-when its action, resource and every condition match. `Principal` and
-`NotPrincipal` are ignored by `Evaluate`, since an identity-based policy has
-none (`reference_policies_elements_principal.html`). A statement with no
+when its action, resource and every condition match. A statement with a
+`Principal` or `NotPrincipal` never applies in `Evaluate`, since an
+identity-based policy has none (`reference_policies_elements_principal.html`). A statement with no
 `Resource` or `NotResource` applies to no resource in `Evaluate`.
 
 **Grammar** (`reference_policies_grammar.html`, `reference_policies_elements_*.html`).
@@ -175,8 +180,8 @@ the root user, `aws:userid` are derived from `Request.Principal` when
 **Trust policies** (`reference_policies_elements_principal.html`,
 `..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic
 to statements whose action matches, whose `Principal` names the caller (or
-whose `NotPrincipal` does not), and whose conditions hold; `Resource` is
-ignored. `"*"` and `{"AWS":"*"}` match anyone. An account ID or
+whose `NotPrincipal` does not), and whose conditions hold; a statement with
+no `Principal` or with a `Resource` never applies. `"*"` and `{"AWS":"*"}` match anyone. An account ID or
 `arn:...:iam::ACCOUNT:root` matches every principal of the account. A role
 ARN matches the role's sessions (`arn:...:sts::ACCOUNT:assumed-role/NAME/...`,
 by partition, account and name, so a role path does not matter) and a caller

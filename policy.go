@@ -82,11 +82,13 @@ type Result struct {
 // statement order, or else the first Allow.
 //
 // A statement applies when its Action or NotAction, its Resource or
-// NotResource and all of its conditions match. Principal and NotPrincipal
-// are not part of an identity-based policy ("You cannot use the Principal
-// element in an identity-based policy."; Principal page) and are ignored
-// here; a statement without Resource or NotResource applies to no
-// resource.
+// NotResource and all of its conditions match. A statement with a
+// Principal or NotPrincipal never applies: identity evaluation does not
+// honor them, and an identity-based policy cannot have them ("You cannot
+// use the Principal element in an identity-based policy."; Principal page),
+// so such a statement, which only the lenient Parse accepts, is not an
+// identity statement. A statement without Resource or NotResource applies
+// to no resource. Parse policies for Evaluate with ParseIdentity.
 func Evaluate(req Request, policies ...*Policy) Result {
 	rc := newRequestContext(req.Principal, req.Context)
 	allow := Result{Decision: ImplicitDeny, Policy: -1}
@@ -95,7 +97,8 @@ func Evaluate(req Request, policies ...*Policy) Result {
 			continue
 		}
 		for _, s := range p.statements {
-			if !s.matchesAction(req.Action) || !s.matchesResource(req.Resource, p.vars, rc) ||
+			if s.principal != nil || !s.matchesAction(req.Action) ||
+				!s.matchesResource(req.Resource, p.vars, rc) ||
 				!s.conditionsHold(p.vars, rc) {
 				continue
 			}
@@ -133,10 +136,12 @@ type TrustResult struct {
 //
 // A statement applies when its Action or NotAction matches, its Principal
 // names the caller (or its NotPrincipal does not), and all of its
-// conditions hold; see principals.matches for how values match. A
-// statement without a Principal or NotPrincipal applies to no caller, and
-// Resource is ignored: a trust policy's resource is the role. As in
-// Evaluate, a Deny that applies wins, else an Allow that applies allows.
+// conditions hold; see principals.matches for how values match. Only trust
+// statements count: one without a Principal or NotPrincipal, or with a
+// Resource or NotResource, never applies, since a trust policy names no
+// resource (it is attached to the role). As in Evaluate, a Deny that
+// applies wins, else an Allow that applies allows. Parse trust policies
+// with ParseTrust.
 //
 // Direct matters because AWS treats the two kinds of grant differently:
 // "If a resource-based policy grants permission directly to the IAM user
@@ -181,7 +186,7 @@ func AllowsPrincipal(trust *Policy, action, principalARN string, ctx map[string]
 // trusts reports whether a trust policy statement applies to the caller,
 // and how its Principal named the caller (matchNone under NotPrincipal).
 func (s *statement) trusts(action, caller string, vars bool, rc *requestContext) (matchKind, bool) {
-	if s.principal == nil || !s.matchesAction(action) {
+	if s.principal == nil || s.hasResource || !s.matchesAction(action) {
 		return matchNone, false
 	}
 	kind := s.principal.matches(caller, rc)
