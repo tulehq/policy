@@ -1,0 +1,295 @@
+package policy
+
+import (
+	"strings"
+)
+
+// Condition operators follow the IAM User Guide's "IAM JSON policy
+// elements: Condition operators"
+// (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html),
+// "Single-valued vs. multivalued context keys"
+// (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-single-vs-multi-valued-context-keys.html)
+// and "Conditions with multiple context keys or values"
+// (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-logic-multiple-context-keys-or-values.html).
+
+// valueKind is the family of a base condition operator.
+type valueKind uint8
+
+const (
+	kindString valueKind = iota
+	kindStringFold
+	kindStringLike
+	kindNumeric
+	kindDate
+	kindBool
+	kindBinary
+	kindIP
+	kindARN
+	kindNull
+)
+
+// order is the comparison a Numeric or Date operator makes between the
+// request's value and the policy's.
+type order uint8
+
+const (
+	orderEq order = iota
+	orderLt
+	orderLe
+	orderGt
+	orderGe
+)
+
+// baseOp is a condition operator without its set or IfExists qualifiers.
+type baseOp struct {
+	kind valueKind
+	// negated operators match when no policy value matches; across a key's
+	// policy values that is a NOR ("If a single negated matching condition
+	// operator includes multiple values for a context key, those values are
+	// evaluated using a logical NOR."; "Conditions with multiple context
+	// keys or values").
+	negated bool
+	order   order
+}
+
+// vars reports whether policy variables are replaced in the operator's
+// values. The operators page lists policy variables as supported for the
+// String, Boolean and ARN operators and not for Numeric, Date, Binary or IP
+// address; Null takes none ("You can not use a policy variable with the
+// Null condition operator."). The variables page omits Boolean; this
+// follows the operators page, which is the one that defines each operator.
+func (b baseOp) vars() bool {
+	switch b.kind {
+	case kindString, kindStringFold, kindStringLike, kindARN, kindBool:
+		return true
+	default:
+		return false
+	}
+}
+
+// baseOps is every base operator the operators page documents. The page
+// says ArnEquals and ArnLike "behave identically", as do ArnNotEquals and
+// ArnNotLike.
+var baseOps = map[string]baseOp{
+	"StringEquals":              {kind: kindString},
+	"StringNotEquals":           {kind: kindString, negated: true},
+	"StringEqualsIgnoreCase":    {kind: kindStringFold},
+	"StringNotEqualsIgnoreCase": {kind: kindStringFold, negated: true},
+	"StringLike":                {kind: kindStringLike},
+	"StringNotLike":             {kind: kindStringLike, negated: true},
+	"NumericEquals":             {kind: kindNumeric},
+	"NumericNotEquals":          {kind: kindNumeric, negated: true},
+	"NumericLessThan":           {kind: kindNumeric, order: orderLt},
+	"NumericLessThanEquals":     {kind: kindNumeric, order: orderLe},
+	"NumericGreaterThan":        {kind: kindNumeric, order: orderGt},
+	"NumericGreaterThanEquals":  {kind: kindNumeric, order: orderGe},
+	"DateEquals":                {kind: kindDate},
+	"DateNotEquals":             {kind: kindDate, negated: true},
+	"DateLessThan":              {kind: kindDate, order: orderLt},
+	"DateLessThanEquals":        {kind: kindDate, order: orderLe},
+	"DateGreaterThan":           {kind: kindDate, order: orderGt},
+	"DateGreaterThanEquals":     {kind: kindDate, order: orderGe},
+	"Bool":                      {kind: kindBool},
+	"BinaryEquals":              {kind: kindBinary},
+	"IpAddress":                 {kind: kindIP},
+	"NotIpAddress":              {kind: kindIP, negated: true},
+	"ArnEquals":                 {kind: kindARN},
+	"ArnLike":                   {kind: kindARN},
+	"ArnNotEquals":              {kind: kindARN, negated: true},
+	"ArnNotLike":                {kind: kindARN, negated: true},
+	"Null":                      {kind: kindNull},
+}
+
+// setOp is the ForAllValues: or ForAnyValue: qualifier.
+type setOp uint8
+
+const (
+	setNone setOp = iota
+	setForAll
+	setForAny
+)
+
+// operator is a parsed condition operator name.
+type operator struct {
+	// known is false for a name this package does not implement. A
+	// condition with an unknown operator never holds, so its statement
+	// never applies: the request is not allowed by an Allow statement with
+	// it, and not denied by a Deny statement with it.
+	known    bool
+	set      setOp
+	ifExists bool
+	base     baseOp
+}
+
+// parseOperator parses a condition operator name. Names are matched
+// exactly, as the operators page spells them.
+//
+// "You can add IfExists to the end of any condition operator name except
+// the Null condition" (operators page, "...IfExists condition operators").
+// ForAllValues: and ForAnyValue: qualify any operator but Null, which tests
+// whether a key is present rather than its values.
+func parseOperator(name string) operator {
+	op := operator{}
+	rest := name
+	if r, ok := strings.CutPrefix(rest, "ForAllValues:"); ok {
+		op.set, rest = setForAll, r
+	} else if r, ok := strings.CutPrefix(rest, "ForAnyValue:"); ok {
+		op.set, rest = setForAny, r
+	}
+	base, ok := baseOps[rest]
+	if !ok {
+		trimmed, cut := strings.CutSuffix(rest, "IfExists")
+		base, ok = baseOps[trimmed]
+		ok = ok && cut && trimmed != "Null"
+		op.ifExists = true
+	}
+	if !ok || (base.kind == kindNull && op.set != setNone) {
+		return operator{}
+	}
+	op.known, op.base = true, base
+	return op
+}
+
+// condition is one condition key under one operator, with its policy
+// values.
+type condition struct {
+	key    string
+	values []string
+	op     operator
+}
+
+// holds evaluates the condition against the request.
+//
+// A key's policy values are ORed ("If a single condition operator includes
+// multiple values for a context key, those values are evaluated using a
+// logical OR."), and a negated operator holds when none matches.
+//
+// A missing key: "If the key that you specify in a policy condition is not
+// present in the request context, the values do not match and the
+// condition is false. If the policy condition requires that the key is not
+// matched, such as StringNotLike or ArnNotLike, and the right key is not
+// present, the condition is true. This logic applies to all condition
+// operators except ...IfExists and Null check." With IfExists, "If the key
+// is not present, evaluate the condition element as true." ForAllValues
+// "also returns true if there are no context keys in the request", and
+// ForAnyValue returns false "if the key does not exist". For both set
+// operators a key whose only value is the empty string is a missing key:
+// ForAllValues "returns true if there are no context keys in the request
+// or if the context key value resolves to a null dataset, such as an empty
+// string."
+//
+// A request value or policy value that is not valid for the operator, such
+// as "abc" for a Numeric operator, makes the condition false whether or
+// not the operator is negated, so a malformed value never satisfies a
+// condition.
+func (c condition) holds(vars bool, rc *requestContext) bool {
+	vals, present, decided, result := c.precheck(rc)
+	if decided {
+		return result
+	}
+	if !present {
+		return c.missing()
+	}
+	match, ok := compileValues(c.op.base, c.values, vars && c.op.base.vars(), rc)
+	if !ok {
+		return false
+	}
+	hits := make([]bool, len(vals))
+	for i, v := range vals {
+		hit, valid := match(v)
+		if !valid {
+			return false
+		}
+		hits[i] = hit
+	}
+	return c.combine(hits)
+}
+
+// precheck looks up the condition's key and decides the conditions that do
+// not need its values: an unknown operator and Null.
+func (c condition) precheck(rc *requestContext) (vals []string, present, decided, result bool) {
+	if !c.op.known {
+		return nil, false, true, false
+	}
+	vals, present = rc.get(c.key)
+	if c.op.base.kind == kindNull {
+		return nil, false, true, nullHolds(c.values, present)
+	}
+	if c.op.set != setNone && len(vals) == 1 && vals[0] == "" {
+		present = false
+	}
+	return vals, present, false, false
+}
+
+// missing is the result of the condition when its key is not present.
+func (c condition) missing() bool {
+	switch {
+	case c.op.ifExists, c.op.set == setForAll:
+		return true
+	case c.op.set == setForAny:
+		return false
+	default:
+		return c.op.base.negated
+	}
+}
+
+// combine folds whether each request value matched any policy value into
+// the condition's result.
+//
+// Without a set operator a key's request values are treated as one set
+// that matches when any value matches; the IAM User Guide requires a set
+// operator for a multivalued key and does not define the result without
+// one. ForAnyValue holds when at least one request value passes and
+// ForAllValues when every one does, where a value passes a negated
+// operator when it matches no policy value: "ForAllValues:StringNotEquals
+// ... None of the values of the context key in the request can match any
+// of the context key values in your policy" and "ForAnyValue:StringNotEquals
+// ... At least one context key value in the request must NOT match any of
+// values in the context key in your policy." (operators page, "Multivalued
+// string condition operators").
+func (c condition) combine(hits []bool) bool {
+	neg := c.op.base.negated
+	switch c.op.set {
+	case setForAll:
+		for _, h := range hits {
+			if h == neg {
+				return false
+			}
+		}
+		return true
+	case setForAny:
+		for _, h := range hits {
+			if h != neg {
+				return true
+			}
+		}
+		return false
+	default:
+		for _, h := range hits {
+			if h {
+				return !neg
+			}
+		}
+		return neg
+	}
+}
+
+// nullHolds evaluates the Null operator: "use either true (the key doesn't
+// exist — it is null) or false (the key exists and its value is not null)"
+// (operators page, "Condition operator to check existence of condition
+// keys"). Values other than true and false match nothing.
+func nullHolds(values []string, present bool) bool {
+	for _, v := range values {
+		switch strings.ToLower(v) {
+		case "true":
+			if !present {
+				return true
+			}
+		case "false":
+			if present {
+				return true
+			}
+		}
+	}
+	return false
+}
