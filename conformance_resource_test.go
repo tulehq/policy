@@ -7,6 +7,7 @@ package policy_test
 // documented choice) or "ASSUMPTION:" with the reasoning.
 
 import (
+	"errors"
 	"io/fs"
 	"path"
 	"strings"
@@ -914,5 +915,175 @@ func TestConformanceResourceReasonMessages(t *testing.T) {
 		if got := r.Message("secretsmanager:GetSecretValue"); got != want {
 			t.Errorf("%v.Message = %q, want %q (source: %s)", r, got, want, docAccessDenied)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Principal values at parse
+
+// rpPrincipalDoc is a policy whose one statement names principal (an AWS
+// value) and, for a resource-based policy, a resource.
+func rpPrincipalDoc(principal string, resource bool) string {
+	r := ""
+	action := "sts:AssumeRole"
+	if resource {
+		r, action = `,"Resource":"arn:aws:s3:::amzn-s3-demo-bucket/*"`, "s3:GetObject"
+	}
+	return `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":{"AWS":"` + principal +
+		`"},"Action":"` + action + `"` + r + `}}`
+}
+
+//nolint:govet // fieldalignment: field order reads as the table rows do.
+var rpPrincipalParseCases = []struct {
+	name, src, stated, principal string
+	ok                           bool
+}{
+	{
+		"root arn",
+		docPrincipal,
+		"arn:aws:iam::account-ID:root",
+		"arn:aws:iam::" + rpAcct + ":root",
+		true,
+	},
+	{
+		"root arn with a region", docIdentifiers, "For IAM resources, this is always kept blank",
+		"arn:aws:iam:us-east-1:" + rpAcct + ":root", false,
+	},
+	{
+		"root arn with a short account",
+		docIdentifiers,
+		"account specifies the AWS account ID with no hyphens",
+		"arn:aws:iam::12345:root",
+		false,
+	},
+	{
+		"user arn with a path",
+		docIdentifiers,
+		"user/user-name-with-path",
+		"arn:aws:iam::" + rpAcct + ":user/a/b/dev",
+		true,
+	},
+	{
+		"role arn with a path",
+		docIdentifiers,
+		"role/role-name-with-path",
+		"arn:aws:iam::" + rpAcct + ":role/a/Reader",
+		true,
+	},
+	{
+		"session arn", docPrincipal, "assumed-role/role-name/role-session-name",
+		"arn:aws:sts::" + rpAcct + ":assumed-role/Reader/s1", true,
+	},
+	{
+		"federated user arn",
+		docPrincipal,
+		"You can specify federated user sessions in the Principal element of a resource-based policy",
+		"arn:aws:sts::" + rpAcct + ":federated-user/dev",
+		true,
+	},
+	{
+		"group arn", docPrincipal, "You cannot identify a user group as a principal in a policy",
+		"arn:aws:iam::" + rpAcct + ":group/Developers", false,
+	},
+	{
+		"policy arn",
+		docPrincipal,
+		"not a principal type the page lists",
+		"arn:aws:iam::" + rpAcct + ":policy/P",
+		false,
+	},
+	{
+		"upper-case ROOT",
+		docIdentifiers,
+		"arn:aws:iam::account:root",
+		"arn:aws:iam::" + rpAcct + ":ROOT",
+		false,
+	},
+	{
+		"trailing space",
+		docIdentifiers,
+		"UserName pattern [\\w+=,.@-]+",
+		"arn:aws:iam::" + rpAcct + ":user/dev ",
+		false,
+	},
+	{
+		"session arn without a session", docPrincipal, "assumed-role/role-name/role-session-name",
+		"arn:aws:sts::" + rpAcct + ":assumed-role/Reader", false,
+	},
+	{
+		"session arn with an empty session",
+		docPrincipal,
+		"assumed-role/role-name/role-session-name",
+		"arn:aws:sts::" + rpAcct + ":assumed-role/Reader/",
+		false,
+	},
+	{
+		"user arn without a name",
+		docIdentifiers,
+		"user/user-name-with-path",
+		"arn:aws:iam::" + rpAcct + ":user/",
+		false,
+	},
+	{
+		"user arn with a path and no name", docIdentifiers, "user/user-name-with-path",
+		"arn:aws:iam::" + rpAcct + ":user/team/", false,
+	},
+	{
+		"policy variable",
+		docPrincipal,
+		"You cannot use a wildcard to match part of a principal name or ARN; " +
+			"Principal is not among the elements that take variables",
+		"arn:aws:iam::" + rpAcct + ":user/${aws:username}",
+		false,
+	},
+	{
+		"empty partition", docIdentifiers, "partition identifies the partition for the resource",
+		"arn::iam::" + rpAcct + ":user/dev", false,
+	},
+	{
+		"other service",
+		docPrincipal,
+		"an AWS principal is an IAM or STS identity",
+		"arn:aws:s3:::" + rpAcct,
+		false,
+	},
+}
+
+// Principal values in resource-based policies (ParseResource), and the
+// regional root ARN in a trust policy (ParseTrust) too. Refusals carry
+// IAM's "Invalid principal in policy".
+func TestConformanceResourcePrincipalParse(t *testing.T) {
+	for _, c := range rpPrincipalParseCases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := policy.ParseResource([]byte(rpPrincipalDoc(c.principal, true)))
+			rpCheckParse(t, err, c.ok, c.src, c.stated)
+		})
+	}
+	trust := map[string]bool{
+		"arn:aws:iam::" + rpAcct + ":root":          true,
+		"arn:aws:iam:us-east-1:" + rpAcct + ":root": false,
+		"arn:aws:iam::12345:root":                   false,
+	}
+	for principal, ok := range trust {
+		t.Run("trust "+principal, func(t *testing.T) {
+			_, err := policy.ParseTrust([]byte(rpPrincipalDoc(principal, false)))
+			rpCheckParse(t, err, ok, docIdentifiers, "For IAM resources, this is always kept blank")
+			_, err = policy.Parse([]byte(rpPrincipalDoc(principal, false)))
+			rpCheckParse(t, err, ok, docIdentifiers, "Parse takes the same principal values")
+		})
+	}
+}
+
+func rpCheckParse(t *testing.T, err error, ok bool, src, stated string) {
+	t.Helper()
+	if ok {
+		if err != nil {
+			t.Errorf("refused: %v (source: %s; %s)", err, src, stated)
+		}
+		return
+	}
+	var pe *policy.ParseError
+	if !errors.As(err, &pe) || pe.Message != "Invalid principal in policy" {
+		t.Errorf("got %v, want Invalid principal in policy (source: %s; %s)", err, src, stated)
 	}
 }

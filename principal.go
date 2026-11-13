@@ -81,7 +81,8 @@ func parsePrincipals(v any, resource bool) (*principals, error) {
 
 // checkPrincipalIDs checks the values of one principal type and reports
 // whether they include the AWS "*". In a resource-based policy (resource)
-// an AWS value may also be a user or role unique ID, and Federated is not
+// an AWS value may also be a user or role unique ID, an ARN must have one
+// of the forms isResourcePrincipalARN allows, and Federated is not
 // accepted (see ParseResource).
 func checkPrincipalIDs(typ string, ids []string, resource bool) (all, ok bool) {
 	if resource && typ == "Federated" {
@@ -101,8 +102,8 @@ func checkPrincipalIDs(typ string, ids []string, resource bool) (all, ok bool) {
 // validPrincipalID reports whether id, not "*", is a valid value of the
 // principal type typ.
 func validPrincipalID(typ, id string, resource bool) bool {
-	if resource && typ == "AWS" && isUniqueID(id) {
-		return true
+	if resource && typ == "AWS" {
+		return isAccountID(id) || isUniqueID(id) || isResourcePrincipalARN(id)
 	}
 	return !strings.ContainsAny(id, "*?") && principalIDTypes[typ](id)
 }
@@ -138,7 +139,11 @@ func isUniqueID(id string) bool {
 // so that the types stay apart ("AWS JSON policy elements: Principal"):
 //
 //   - AWS: a 12-digit account ID, or an IAM or STS ARN (account root,
-//     user, role, assumed-role session, federated user).
+//     user, role, assumed-role session, federated user) with a blank
+//     region and a 12-digit account: "For IAM resources, this is always
+//     kept blank." and "account specifies the AWS account ID with no
+//     hyphens" ("IAM identifiers", IAM ARNs,
+//     https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html).
 //   - Service: a service principal such as "ecs.amazonaws.com", a dotted
 //     name that is not an ARN.
 //   - Federated: an IAM SAML or OIDC provider ARN, or a built-in OIDC
@@ -149,7 +154,8 @@ var principalIDTypes = map[string]func(string) bool{
 	"AWS": func(id string) bool {
 		a, ok := parseARN(id)
 		return isAccountID(id) ||
-			ok && (a.service == "iam" || a.service == "sts") && a.account != ""
+			ok && (a.service == "iam" || a.service == "sts") && a.region == "" &&
+				isAccountID(a.account)
 	},
 	"Service": isDottedName,
 	"Federated": func(id string) bool {
