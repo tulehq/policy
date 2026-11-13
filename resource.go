@@ -47,15 +47,14 @@ type Caller struct {
 	// PrincipalARN is the value of aws:PrincipalArn: ARN for a user or the
 	// root user, and the role's ARN, path included, for a role session.
 	// For a role session an empty PrincipalARN means the session's role
-	// no longer exists: nothing that names the role then matches the
-	// caller, and aws:PrincipalArn is absent.
+	// no longer exists, and Authorize denies the session.
 	PrincipalARN string
 	// UserID is the value of aws:userid: an IAM user's unique ID (AIDA...),
 	// the account ID for the root user, and <role ID>:<session name> for
 	// a role session, the role ID being the role's unique ID (AROA...).
 	UserID string
-	// Type is the value of aws:PrincipalType. A caller of any other type
-	// matches only "*" and account principals.
+	// Type is the value of aws:PrincipalType. Authorize denies a caller of
+	// any other type, and one whose fields disagree (see Caller.valid).
 	Type PrincipalType
 }
 
@@ -139,9 +138,10 @@ type AuthorizeRequest struct {
 	// Caller is the principal that makes the request.
 	Caller Caller
 	// Context holds the request's condition context keys and their values,
-	// as in Request. aws:PrincipalArn, aws:PrincipalAccount, aws:userid and
-	// aws:PrincipalType come from Caller and replace any value Context
-	// gives them; each is absent when its Caller field is empty.
+	// as in Request. aws:PrincipalArn, aws:PrincipalAccount, aws:userid,
+	// aws:PrincipalType and aws:username come from Caller and replace any
+	// value Context gives them (aws:username is an IAM user's name, absent
+	// for other callers).
 	Context map[string][]string
 }
 
@@ -197,6 +197,18 @@ type Authorization struct {
 //     Allow (else NoIdentityAllow) and a resource-based Allow of any kind
 //     (else NoResourceAllow) are both needed.
 //
+// Before any policy is read, two kinds of caller are denied with
+// ImplicitDeny and NoIdentityAllow:
+//
+//   - A Caller whose fields disagree with one another (see Caller.valid),
+//     such as an Account type with a user ARN, or an ARN of another
+//     account than AccountID. Matching and the root rule below rely on
+//     the fields agreeing, so a descriptor that breaks them grants nothing.
+//   - A session whose role was deleted (Type AssumedRole, empty
+//     PrincipalARN). This package's choice: such a session has no
+//     aws:PrincipalArn, so a Deny keyed on the role's ARN would not apply
+//     to it, and identity refuses it everything but GetCallerIdentity.
+//
 // A root user caller (PrincipalTypeAccount) has an identity-based Allow
 // without policies: "all requests are implicitly denied with the exception
 // of the AWS account root user, which has full access". Authorize applies
@@ -210,6 +222,15 @@ type Authorization struct {
 // statement without a Principal or NotPrincipal, or without a Resource or
 // NotResource, never applies.
 func Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy) Authorization {
+	if !req.Caller.valid() || req.Caller.orphaned() {
+		none := Result{Decision: ImplicitDeny, Policy: -1}
+		return Authorization{
+			Decision: ImplicitDeny,
+			Reason:   NoIdentityAllow,
+			Identity: none,
+			Resource: none,
+		}
+	}
 	rc := callerContext(req.Caller, req.Context)
 	id := evaluateIdentity(req.Action, req.Resource, rc, identity)
 	if req.Caller.Type == PrincipalTypeAccount && id.Decision == ImplicitDeny {
@@ -252,18 +273,23 @@ func decideAllow(idAllow, resAllow, direct, same bool) (Decision, Reason) {
 }
 
 // callerContext is the request context for c: ctx, with aws:PrincipalArn,
-// aws:PrincipalAccount, aws:userid and aws:PrincipalType taken from c.
-// An empty field makes its key absent, and an absent key is never derived
-// from c.ARN, so an orphaned session (see Caller.PrincipalARN) has no
-// aws:PrincipalArn. aws:username is derived from c.ARN for a user when
-// ctx lacks it, as in Evaluate.
+// aws:PrincipalAccount, aws:userid, aws:PrincipalType and aws:username
+// taken from c, whatever ctx gives them. aws:username is an IAM user's
+// name, the last element of its ARN, and is absent for other callers ("IAM
+// policy elements: Variables and tags"). An empty value makes its key
+// absent, and an absent key is never derived from c.ARN.
 func callerContext(c Caller, ctx map[string][]string) *requestContext {
 	rc := newRequestContext(c.ARN, ctx)
+	username := ""
+	if c.Type == PrincipalTypeUser {
+		username = c.ARN[strings.LastIndexByte(c.ARN, '/')+1:]
+	}
 	for key, v := range map[string]string{
 		"aws:principalarn":     c.PrincipalARN,
 		"aws:principalaccount": c.AccountID,
 		"aws:userid":           c.UserID,
 		"aws:principaltype":    string(c.Type),
+		"aws:username":         username,
 	} {
 		if v == "" {
 			// Present with no values: absent, and not derived (see get).
@@ -288,8 +314,13 @@ func evaluateResource(
 	if p == nil {
 		return res, false
 	}
+	// The partition an account ID principal names: the resource's.
+	partition := ""
+	if a, ok := parseARN(resource); ok {
+		partition = a.partition
+	}
 	for _, s := range p.statements {
-		kind, applies := s.grants(action, resource, caller, p.vars, rc)
+		kind, applies := s.grants(action, resource, partition, caller, p.vars, rc)
 		if !applies {
 			continue
 		}
@@ -308,7 +339,7 @@ func evaluateResource(
 // request, and how its Principal named the caller (matchNone under
 // NotPrincipal).
 func (s *statement) grants(
-	action, resource string,
+	action, resource, partition string,
 	caller Caller,
 	vars bool,
 	rc *requestContext,
@@ -318,10 +349,10 @@ func (s *statement) grants(
 	}
 	kind := matchNone
 	if s.notPrincipal {
-		if s.principal.excludes(caller) {
+		if s.principal.excludes(caller, partition) {
 			return matchNone, false
 		}
-	} else if kind = s.principal.callerMatch(caller); kind == matchNone {
+	} else if kind = s.principal.callerMatch(caller, partition); kind == matchNone {
 		return matchNone, false
 	}
 	return kind, s.conditionsHold(vars, rc)
@@ -340,9 +371,13 @@ func (s *statement) grants(
 //     anonymous users (public access). For IAM users and role principals
 //     within your account, no other permissions are required."
 //   - An account ID, or arn:partition:iam::account:root, matches every
-//     caller of that account (for the root ARN, also of that partition)
-//     through the account: "The account ARN and the shortened account ID
-//     behave the same way. Both delegate permissions to the account."
+//     caller of that account and partition through the account: "The
+//     account ARN and the shortened account ID behave the same way. Both
+//     delegate permissions to the account." An account ID carries no
+//     partition, so it names the account in the resource's partition
+//     (partition; none when the resource is not an ARN): "You cannot
+//     delegate access between accounts in different partitions." ("IAM
+//     identifiers").
 //   - A user ARN matches the IAM user (Type User) with that ARN.
 //   - A role ARN matches a session of the role (Type AssumedRole) whose
 //     PrincipalARN is that ARN, path included: "You can specify the role
@@ -358,21 +393,21 @@ func (s *statement) grants(
 //   - Service, CanonicalUser and Federated values, federated-user session
 //     ARNs and other ARNs match no caller: no Caller is a service, a
 //     canonical user or a federated user.
-func (p *principals) callerMatch(c Caller) matchKind {
+func (p *principals) callerMatch(c Caller, partition string) matchKind {
 	if p.all {
 		return matchDirect
 	}
 	best := matchNone
 	for _, id := range p.byType["AWS"] {
-		best = max(best, awsCallerMatch(id, c))
+		best = max(best, awsCallerMatch(id, c, partition))
 	}
 	return best
 }
 
-func awsCallerMatch(id string, c Caller) matchKind {
+func awsCallerMatch(id string, c Caller, partition string) matchKind {
 	switch {
 	case isAccountID(id):
-		return kindIf(c.AccountID == id, matchAccount)
+		return kindIf(accountMatches(partition, id, c), matchAccount)
 	case isUniqueID(id):
 		return kindIf(uniqueIDMatches(id, c), matchDirect)
 	}
@@ -381,11 +416,17 @@ func awsCallerMatch(id string, c Caller) matchKind {
 	case !ok:
 		return matchNone
 	case a.isRoot():
-		ca, ok := parseARN(c.ARN)
-		return kindIf(ok && ca.partition == a.partition && a.account == c.AccountID, matchAccount)
+		return kindIf(accountMatches(a.partition, a.account, c), matchAccount)
 	default:
 		return kindIf(identityARNMatches(a, id, c), matchDirect)
 	}
+}
+
+// accountMatches reports whether the caller is in the account account of
+// partition, by the account and the partition of its ARN.
+func accountMatches(partition, account string, c Caller) bool {
+	ca, ok := parseARN(c.ARN)
+	return ok && partition != "" && ca.partition == partition && c.AccountID == account
 }
 
 // kindIf is kind when cond holds, else matchNone.
@@ -430,22 +471,35 @@ func uniqueIDMatches(id string, c Caller) bool {
 // ARN for the account containing that role." ("AWS JSON policy elements:
 // NotPrincipal",
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_notprincipal.html).
-// AWS leaves the exact rule to each service ("might"); this package's
-// choice, the strict reading, is that the caller is exempt only when the
-// element names its account (by account ID or root ARN) and, unless the
-// caller is the root user, the caller itself as Principal would (its user
-// ARN or ID, or its role's ARN or ID or its session ARN), or when the
-// element is "*". An orphaned session is never named itself, so it is
-// never exempt unless by "*".
-func (p *principals) excludes(c Caller) bool {
+// AWS leaves the exact rule to each service ("might"). This package's
+// choice is the strict reading of the page's recommendation: the element
+// is "*", or it names the caller's account (by account ID or root ARN)
+// and also:
+//
+//   - for the root user, nothing more;
+//   - for an IAM user, that user, by its ARN or unique ID;
+//   - for a role session, the role, by its ARN or unique ID. The session's
+//     own ARN does not count: it names the session, not the role the page
+//     says to list.
+func (p *principals) excludes(c Caller, partition string) bool {
 	if p.all {
 		return true
 	}
-	account, direct := false, false
+	account, self := false, false
 	for _, id := range p.byType["AWS"] {
-		kind := awsCallerMatch(id, c)
+		kind := awsCallerMatch(id, c, partition)
 		account = account || kind == matchAccount
-		direct = direct || kind == matchDirect
+		self = self || kind == matchDirect && !isSessionARN(id)
 	}
-	return account && (direct || c.Type == PrincipalTypeAccount)
+	return account && (self || c.Type == PrincipalTypeAccount)
+}
+
+// isSessionARN reports whether id is an assumed-role session ARN.
+func isSessionARN(id string) bool {
+	a, ok := parseARN(id)
+	if !ok {
+		return false
+	}
+	_, isSession := a.assumedRole()
+	return isSession
 }

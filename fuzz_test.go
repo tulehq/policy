@@ -213,7 +213,8 @@ func FuzzAuthorize(f *testing.F) {
 		f.Add(c.AccountID, c.ARN, c.PrincipalARN, c.UserID, string(c.Type), acct,
 			"s3:GetObject", "arn:aws:s3:::b/k", uint8(2), false)
 	}
-	f.Add(other, "arn:aws:iam::"+other+":user/x", "", "", "User", acct, "s3:PutObject",
+	f.Add(other, "arn:aws:iam::"+other+":user/x", "arn:aws:iam::"+other+":user/x",
+		"AIDAXEXAMPLE000000001", "User", acct, "s3:PutObject",
 		"arn:aws:s3:::b/private/k", uint8(3), true)
 	f.Fuzz(
 		func(t *testing.T, account, arn, principalARN, userID, typ, resAccount, action, resource string,
@@ -239,10 +240,11 @@ func FuzzAuthorize(f *testing.F) {
 				Caller:          c,
 			}
 			got := Authorize(req, rp, ids...)
-			checkAuthorization(t, got, isAccountID(account) && account == resAccount)
-			if c.orphaned() && got.Direct && n != 0 {
-				t.Fatalf("an orphaned session was granted directly other than by \"*\": %+v", got)
+			if !c.valid() || c.orphaned() {
+				checkRefused(t, got)
+				return
 			}
+			checkAuthorization(t, got, account == resAccount)
 			if d := Authorize(
 				req,
 				rp,
@@ -251,6 +253,16 @@ func FuzzAuthorize(f *testing.F) {
 			}
 		},
 	)
+}
+
+// checkRefused checks that a caller Authorize must refuse before reading
+// any policy (an invalid or orphaned one) was refused so.
+func checkRefused(t *testing.T, a Authorization) {
+	t.Helper()
+	none := Result{Decision: ImplicitDeny, Policy: -1}
+	if a != (Authorization{Decision: ImplicitDeny, Reason: NoIdentityAllow, Identity: none, Resource: none}) {
+		t.Fatalf("an invalid or orphaned caller was evaluated: %+v", a)
+	}
 }
 
 // checkAuthorization checks the invariants of one Authorize result: the

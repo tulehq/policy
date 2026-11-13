@@ -25,6 +25,9 @@ const (
 	// srcOrphan is the rule for a session whose role was deleted, as the
 	// signing side states it.
 	srcOrphan = "tule.dev/sigv4 v0.4.1, keys.go, Principal.PrincipalARN"
+	// srcCaller is the definition of the descriptor's fields, which must
+	// agree with one another.
+	srcCaller = "tule.dev/sigv4 v0.4.1, keys.go, Principal"
 )
 
 // Accounts and callers of the rows. Callers carry what sigv4 v0.4.1's
@@ -38,8 +41,19 @@ func rpUser(account, name string) policy.Caller {
 	arn := "arn:aws:iam::" + account + ":user/" + name
 	return policy.Caller{
 		AccountID: account, ARN: arn, PrincipalARN: arn,
-		UserID: "AIDA" + strings.ToUpper(name) + "EXAMPLE000000", Type: policy.PrincipalTypeUser,
+		UserID: rpID("AIDA", name), Type: policy.PrincipalTypeUser,
 	}
+}
+
+// rpID is a unique ID with prefix made from name: its letters and digits,
+// upper-cased.
+func rpID(prefix, name string) string {
+	return prefix + strings.ToUpper(strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, name)) + "EXAMPLE000000"
 }
 
 // rpSession is a session of the role path+name; path is "" or "p/".
@@ -48,7 +62,7 @@ func rpSession(account, path, name, sessionName string) policy.Caller {
 		AccountID:    account,
 		ARN:          "arn:aws:sts::" + account + ":assumed-role/" + name + "/" + sessionName,
 		PrincipalARN: "arn:aws:iam::" + account + ":role/" + path + name,
-		UserID:       "AROA" + strings.ToUpper(name) + "EXAMPLE000000:" + sessionName,
+		UserID:       rpID("AROA", name) + ":" + sessionName,
 		Type:         policy.PrincipalTypeAssumedRole,
 	}
 }
@@ -180,7 +194,8 @@ func or(s, def string) string {
 
 var rpExampleUser = policy.Caller{
 	AccountID: "123456789012", ARN: "arn:aws:iam::123456789012:user/carlossalazar",
-	PrincipalARN: "arn:aws:iam::123456789012:user/carlossalazar", Type: policy.PrincipalTypeUser,
+	PrincipalARN: "arn:aws:iam::123456789012:user/carlossalazar", UserID: "AIDACKCEVSQ6C2EXAMPLE",
+	Type: policy.PrincipalTypeUser,
 }
 
 var rpSameAccountCases = []rpCase{
@@ -773,129 +788,91 @@ func TestConformanceResourceNotPrincipal(t *testing.T) { rpRun(t, rpNotPrincipal
 // ---------------------------------------------------------------------------
 // A session whose role was deleted
 
-// The rule of srcOrphan: for a role session with an empty
-// PrincipalARN nothing that names the role matches, and aws:PrincipalArn
-// is absent, never derived. AWS's own behavior follows from its binding of
-// a role ARN to the role's unique ID: "if you delete the role, then you
-// break the relationship. The policy no longer applies" (docPrincipal).
+// srcOrphan: for a role session with an empty PrincipalARN nothing that
+// names the role matches, and aws:PrincipalArn is absent, never derived.
+// AWS's own behavior follows from its binding of a role ARN to the role's
+// unique ID: "if you delete the role, then you break the relationship. The
+// policy no longer applies" (docPrincipal). CHOICE, per review: Authorize
+// goes further and denies such a session outright, before any policy is
+// read, since without aws:PrincipalArn a Deny keyed on the role's ARN
+// would not apply to it; identity refuses it everything but
+// GetCallerIdentity.
 var rpOrphanReader = rpOrphan(rpReader)
+
+const rpOrphanStated = "CHOICE: a session whose role was deleted is denied before any policy is read"
+
+// rpOrphanRow is a row for rpOrphanReader that must be denied outright.
+func rpOrphanRow(name, resource string, identity []string, account string, c cfCtx) rpCase {
+	return rpCase{
+		name:     name,
+		src:      srcOrphan,
+		stated:   rpOrphanStated,
+		resource: resource,
+		identity: identity,
+		caller:   rpOrphanReader,
+		account:  account,
+		ctx:      c,
+		want:     policy.ImplicitDeny,
+		reason:   policy.NoIdentityAllow,
+	}
+}
 
 var rpOrphanCases = []rpCase{
 	{
-		name:   "control: role arn grant allows the live session",
-		src:    docEvalDenyAll,
-		stated: "a resource-based grant to the role ARN reaches its session",
-		resource: rpBucket(
+		name: "control: role arn grant allows the live session", src: docEvalDenyAll,
+		stated:   "a resource-based grant to the role ARN reaches its session",
+		resource: rpBucket("Allow", `"Principal":{"AWS":"`+rpReader.PrincipalARN+`"}`, ""),
+		caller:   rpReader, want: policy.Allow,
+	},
+	rpOrphanRow("role arn grant",
+		rpBucket("Allow", `"Principal":{"AWS":"`+rpReader.PrincipalARN+`"}`, ""), nil, "", nil),
+	rpOrphanRow(
+		"session arn grant",
+		rpBucket("Allow", `"Principal":{"AWS":"`+rpReader.ARN+`"}`, ""),
+		nil,
+		"",
+		nil,
+	),
+	rpOrphanRow("role unique id grant",
+		rpBucket("Allow", `"Principal":{"AWS":"AROAREADEREXAMPLE000000"}`, ""), nil, "", nil),
+	rpOrphanRow(
+		"role arn grant across accounts",
+		rpBucket(
 			"Allow",
 			`"Principal":{"AWS":"`+rpReader.PrincipalARN+`"}`,
 			"",
 		),
-		caller: rpReader,
-		want:   policy.Allow,
-	},
-	{
-		name:   "role arn grant",
-		src:    srcOrphan,
-		stated: "nothing that names the role matches",
-		resource: rpBucket(
+		[]string{rpAllowGet},
+		rpOther,
+		nil,
+	),
+	rpOrphanRow(
+		"aws:PrincipalArn condition grant with the key forged in Context",
+		rpBucket(
 			"Allow",
-			`"Principal":{"AWS":"`+rpReader.PrincipalARN+`"}`,
-			"",
+			`"Principal":"*"`,
+			`{"ArnEquals":{"aws:PrincipalArn":"`+rpReader.PrincipalARN+`"}}`,
 		),
-		caller: rpOrphanReader,
-		want:   policy.ImplicitDeny,
-		reason: policy.NoIdentityAllow,
-	},
-	{
-		name: "session arn grant", src: srcOrphan,
-		stated:   "nothing that names the role matches; the session ARN names it",
-		resource: rpBucket("Allow", `"Principal":{"AWS":"`+rpReader.ARN+`"}`, ""),
-		caller:   rpOrphanReader, want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
-	},
-	{
-		name:   "role unique id grant",
-		src:    srcOrphan,
-		stated: "nothing that names the role matches; the role ID names it",
-		resource: rpBucket(
-			"Allow",
-			`"Principal":{"AWS":"AROAREADEREXAMPLE000000"}`,
-			"",
-		),
-		caller: rpOrphanReader,
-		want:   policy.ImplicitDeny,
-		reason: policy.NoIdentityAllow,
-	},
-	{
-		name:   "role arn grant across accounts",
-		src:    srcOrphan,
-		stated: "nothing that names the role matches",
-		resource: rpBucket(
-			"Allow",
-			`"Principal":{"AWS":"`+rpReader.PrincipalARN+`"}`,
-			"",
-		),
-		identity: []string{rpAllowGet},
-		caller:   rpOrphanReader,
-		account:  rpOther,
-		want:     policy.ImplicitDeny,
-		reason:   policy.NoResourceAllow,
-	},
-	{
-		name: "aws:PrincipalArn condition grant",
-		src:  srcOrphan,
-		stated: "aws:PrincipalArn is supplied as an empty slice, never derived, so an ArnEquals on the role ARN " +
-			"does not hold",
-		resource: rpBucket("Allow", `"Principal":"*"`,
-			`{"ArnEquals":{"aws:PrincipalArn":"`+rpReader.PrincipalARN+`"}}`),
-		caller: rpOrphanReader,
-		ctx:    cfCtx{"aws:PrincipalArn": {rpReader.PrincipalARN}},
-		want:   policy.ImplicitDeny,
-		reason: policy.NoIdentityAllow,
-	},
-	{
-		name:   "aws:PrincipalArn deny-all-but",
-		src:    srcOrphan,
-		stated: "with aws:PrincipalArn absent, ArnNotEquals holds, so the Deny applies",
-		resource: rpBucket(
+		nil,
+		"",
+		cfCtx{"aws:PrincipalArn": {rpReader.PrincipalARN}},
+	),
+	rpOrphanRow("account grant with identity allow",
+		rpBucket("Allow", `"Principal":{"AWS":"`+rpAcct+`"}`, ""), []string{rpAllowGet}, "", nil),
+	rpOrphanRow("star grant", rpBucket("Allow", `"Principal":"*"`, ""), nil, "", nil),
+	rpOrphanRow("identity allow alone", "", []string{rpAllowGet}, "", nil),
+	// The review's case: a Deny keyed on aws:userid must not be escaped.
+	rpOrphanRow(
+		"identity allow and a Deny keyed on aws:userid",
+		rpBucket(
 			"Deny",
 			`"Principal":"*"`,
-			`{"ArnNotEquals":{"aws:PrincipalArn":"`+rpReader.PrincipalARN+`"}}`,
+			`{"StringLike":{"aws:userid":"AROAREADEREXAMPLE000000:*"}}`,
 		),
-		identity: []string{rpAllowGet},
-		caller:   rpOrphanReader,
-		want:     policy.ExplicitDeny,
-		reason:   policy.ResourceDeny,
-	},
-	{
-		name:   "NotPrincipal role and account",
-		src:    srcOrphan,
-		stated: "nothing that names the role matches, so the role does not exempt the session from the Deny",
-		resource: rpNot(
-			rpReader.PrincipalARN,
-			rpAcct,
-		),
-		identity: []string{rpAllowGet},
-		caller:   rpOrphanReader,
-		want:     policy.ExplicitDeny,
-		reason:   policy.ResourceDeny,
-	},
-	{
-		name:     "account grant still needs identity",
-		src:      docPrincipal,
-		stated:   "CHOICE: the account does not name the role; the grant delegates to identity policies as for any caller",
-		resource: rpBucket("Allow", `"Principal":{"AWS":"`+rpAcct+`"}`, ""),
-		identity: []string{rpAllowGet},
-		caller:   rpOrphanReader,
-		want:     policy.Allow,
-	},
-	{
-		name:     "star grant",
-		src:      docPrincipal,
-		stated:   `CHOICE: "*" does not name the role; it grants access to all users, including anonymous users`,
-		resource: rpBucket("Allow", `"Principal":"*"`, ""),
-		caller:   rpOrphanReader,
-		want:     policy.Allow,
-	},
+		[]string{rpAllowGet},
+		"",
+		nil,
+	),
 }
 
 func TestConformanceResourceOrphanedSession(t *testing.T) { rpRun(t, rpOrphanCases) }
@@ -917,6 +894,171 @@ func TestConformanceResourceReasonMessages(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Caller descriptors whose fields disagree
+
+// rpForged is a root-typed descriptor carrying a user ARN of another
+// account: its fields disagree, so Authorize must not take it for root.
+var rpForged = policy.Caller{
+	AccountID: rpOther, ARN: rpPartner.ARN, PrincipalARN: rpPartner.ARN, UserID: rpOther,
+	Type: policy.PrincipalTypeAccount,
+}
+
+const rpMismatchStated = "CHOICE: a Caller whose fields disagree is refused before any policy is read"
+
+var rpMismatchCases = []rpCase{
+	{
+		name: "account type with a user arn", src: srcCaller, stated: rpMismatchStated,
+		resource: rpBucket("Allow", `"Principal":{"AWS":"`+rpOther+`"}`, ""), caller: rpForged,
+		want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
+	},
+	{
+		name:   "control: the real root of that account",
+		src:    docEvalDenyAll,
+		stated: "the AWS account root user ... has full access",
+		resource: rpBucket(
+			"Allow",
+			`"Principal":{"AWS":"`+rpOther+`"}`,
+			"",
+		),
+		caller: rpRoot(rpOther),
+		want:   policy.Allow,
+	},
+	{
+		name: "arn of another account than AccountID", src: srcCaller, stated: rpMismatchStated,
+		resource: rpBucket("Allow", `"Principal":{"AWS":"`+rpPartner.ARN+`"}`, ""),
+		identity: []string{rpAllowGet},
+		caller: func() policy.Caller {
+			c := rpPartner
+			c.AccountID = rpAcct
+			return c
+		}(),
+		want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
+	},
+	{
+		name: "session claiming another role", src: srcCaller, stated: rpMismatchStated,
+		resource: rpBucket("Allow", `"Principal":{"AWS":"arn:aws:iam::`+rpAcct+`:role/Admin"}`, ""),
+		caller: func() policy.Caller {
+			c := rpReader
+			c.PrincipalARN = "arn:aws:iam::" + rpAcct + ":role/Admin"
+			return c
+		}(),
+		want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
+	},
+	{
+		name: "user without a unique id", src: srcCaller, stated: rpMismatchStated,
+		resource: rpBucket("Allow", `"Principal":"*"`, ""),
+		caller: func() policy.Caller {
+			c := rpDev
+			c.UserID = ""
+			return c
+		}(),
+		want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
+	},
+	{
+		name: "unknown type", src: srcCaller, stated: rpMismatchStated,
+		resource: rpBucket("Allow", `"Principal":"*"`, ""),
+		caller: func() policy.Caller {
+			c := rpDev
+			c.Type = "FederatedUser"
+			return c
+		}(),
+		want: policy.ImplicitDeny, reason: policy.NoIdentityAllow,
+	},
+}
+
+func TestConformanceResourceCallerMismatch(t *testing.T) { rpRun(t, rpMismatchCases) }
+
+// ---------------------------------------------------------------------------
+// Review rows: NotPrincipal sessions, aws:username, partitions
+
+var rpReviewCases = []rpCase{
+	{
+		name: "NotPrincipal account and session arn deny the session",
+		src:  docNotPrincipal,
+		stated: "CHOICE: include both the ARN for a role and the ARN for the account containing that role; " +
+			"the session ARN does not stand in for the role",
+		resource: rpNot(rpReader.ARN, rpAcct),
+		identity: []string{rpAllowGet},
+		caller:   rpReader,
+		want:     policy.ExplicitDeny,
+		reason:   policy.ResourceDeny,
+	},
+	{
+		name:   "NotPrincipal account and role id exempt the session",
+		src:    docNotPrincipal,
+		stated: "include both the ARN for a role and the ARN for the account containing that role (the role by its ID)",
+		resource: rpNot(
+			rpID("AROA", "Reader"),
+			rpAcct,
+		),
+		identity: []string{rpAllowGet},
+		caller:   rpReader,
+		want:     policy.Allow,
+	},
+	{
+		name: "aws:username forged in Context for a session",
+		src:  docVariables,
+		stated: "aws:username is present for IAM users only; CHOICE: the Caller supplies it and Context " +
+			"cannot",
+		identity: []string{
+			`{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:GetObject",` +
+				`"Resource":"*","Condition":{"StringEquals":{"aws:username":"admin"}}}}`,
+		},
+		caller: rpReader,
+		ctx:    cfCtx{"aws:username": {"admin"}},
+		want:   policy.ImplicitDeny,
+		reason: policy.NoIdentityAllow,
+	},
+	{
+		name:   "aws:username of a user",
+		src:    docVariables,
+		stated: "aws:username is the user's friendly name",
+		identity: []string{
+			`{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:GetObject",` +
+				`"Resource":"*","Condition":{"StringEquals":{"aws:username":"dev"}}}}`,
+		},
+		caller: rpDev,
+		ctx:    cfCtx{"aws:username": {"admin"}},
+		want:   policy.Allow,
+	},
+	{
+		name:   "account id principal in another partition",
+		src:    docIdentifiers,
+		stated: "You cannot delegate access between accounts in different partitions",
+		resource: rpBucket(
+			"Allow",
+			`"Principal":{"AWS":"`+rpOther+`"}`,
+			"",
+		),
+		identity: []string{rpAllowGet},
+		caller:   rpCN,
+		want:     policy.ImplicitDeny,
+		reason:   policy.NoResourceAllow,
+	},
+	{
+		name:     "root arn principal in another partition",
+		src:      docIdentifiers,
+		stated:   "You cannot delegate access between accounts in different partitions",
+		resource: rpBucket("Allow", `"Principal":{"AWS":"arn:aws:iam::`+rpOther+`:root"}`, ""),
+		identity: []string{
+			rpAllowGet,
+		},
+		caller: rpCN,
+		want:   policy.ImplicitDeny,
+		reason: policy.NoResourceAllow,
+	},
+}
+
+// rpCN is a user of rpOther in the aws-cn partition.
+var rpCN = policy.Caller{
+	AccountID: rpOther, ARN: "arn:aws-cn:iam::" + rpOther + ":user/partner",
+	PrincipalARN: "arn:aws-cn:iam::" + rpOther + ":user/partner", UserID: rpID("AIDA", "partner"),
+	Type: policy.PrincipalTypeUser,
+}
+
+func TestConformanceResourceReview(t *testing.T) { rpRun(t, rpReviewCases) }
 
 // ---------------------------------------------------------------------------
 // Principal values at parse

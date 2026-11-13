@@ -119,7 +119,7 @@ func TestCallerMatch(t *testing.T) {
 				t,
 				resourceDoc("Allow", `"Principal":`+c.principal, bucketObjects),
 			)
-			if got := p.statements[0].principal.callerMatch(c.caller); got != c.want {
+			if got := p.statements[0].principal.callerMatch(c.caller, "aws"); got != c.want {
 				t.Fatalf("callerMatch = %v, want %v", got, c.want)
 			}
 		})
@@ -144,7 +144,10 @@ var excludesCases = []struct { //nolint:govet // fieldalignment: field order rea
 	{"account only", `{"AWS":"` + acct + `"}`, devUser, false},
 	{"account only root", `{"AWS":"` + acct + `"}`, root, true},
 	{"role and account", `{"AWS":["` + session.PrincipalARN + `","` + acct + `"]}`, session, true},
-	{"session and account", `{"AWS":["` + session.ARN + `","` + acct + `"]}`, session, true},
+	// The session ARN names the session, not the role the page says to list.
+	{"session and account", `{"AWS":["` + session.ARN + `","` + acct + `"]}`, session, false},
+	{"role id and account", `{"AWS":["AROAREADEREXAMPLE0001","` + acct + `"]}`, session, true},
+	{"user id and account", `{"AWS":["AIDADEVEXAMPLE0000001","` + acct + `"]}`, devUser, true},
 	{
 		"role and account orphan",
 		`{"AWS":["` + session.PrincipalARN + `","` + acct + `"]}`,
@@ -167,7 +170,7 @@ func TestExcludes(t *testing.T) {
 				t,
 				resourceDoc("Deny", `"NotPrincipal":`+c.principal, bucketObjects),
 			)
-			if got := p.statements[0].principal.excludes(c.caller); got != c.want {
+			if got := p.statements[0].principal.excludes(c.caller, "aws"); got != c.want {
 				t.Fatalf("excludes = %v, want %v", got, c.want)
 			}
 		})
@@ -253,13 +256,26 @@ func TestCallerContextAbsentKeys(t *testing.T) {
 		t.Errorf("orphan aws:PrincipalArn = %v, want absent", v)
 	}
 	rc = callerContext(Caller{ARN: devUser.ARN}, nil)
-	for _, key := range []string{"aws:PrincipalArn", "aws:PrincipalAccount", "aws:userid", "aws:PrincipalType"} {
+	for _, key := range []string{
+		"aws:PrincipalArn", "aws:PrincipalAccount", "aws:userid", "aws:PrincipalType", "aws:username",
+	} {
 		if v, ok := rc.get(key); ok {
 			t.Errorf("empty caller %s = %v, want absent", key, v)
 		}
 	}
-	if v, _ := rc.get("aws:username"); len(v) != 1 || v[0] != "dev" {
-		t.Errorf("aws:username = %v", v)
+}
+
+// aws:username comes from the Caller, for an IAM user only, never from
+// Context or from a session's ARN.
+func TestCallerContextUsername(t *testing.T) {
+	forged := map[string][]string{"aws:username": {"admin"}}
+	if v, _ := callerContext(devUser, forged).get("aws:username"); len(v) != 1 || v[0] != "dev" {
+		t.Errorf("user aws:username = %v, want [dev]", v)
+	}
+	for _, c := range []Caller{session, root} {
+		if v, ok := callerContext(c, forged).get("aws:username"); ok {
+			t.Errorf("%s aws:username = %v, want absent", c.Type, v)
+		}
 	}
 }
 
@@ -309,6 +325,46 @@ func TestAuthorizeIgnoresOtherKinds(t *testing.T) {
 	}
 }
 
+// An account ID names the account in the resource's partition, and a root
+// ARN the account in its own partition; either matches a caller of that
+// partition only.
+func TestAccountPrincipalPartition(t *testing.T) {
+	cn := Caller{
+		AccountID:    acct,
+		ARN:          "arn:aws-cn:iam::" + acct + ":user/team/dev",
+		PrincipalARN: "arn:aws-cn:iam::" + acct + ":user/team/dev",
+		UserID:       devUser.UserID,
+		Type:         PrincipalTypeUser,
+	}
+	for _, c := range []struct { //nolint:govet // fieldalignment: field order reads as the rows do.
+		principal, partition string
+		caller               Caller
+		want                 matchKind
+	}{
+		{acct, "aws", devUser, matchAccount},
+		{acct, "aws-cn", devUser, matchNone},
+		{acct, "aws-cn", cn, matchAccount},
+		{acct, "", devUser, matchNone},
+		{"arn:aws:iam::" + acct + ":root", "aws", cn, matchNone},
+		{"arn:aws-cn:iam::" + acct + ":root", "aws", cn, matchAccount},
+	} {
+		p := mustParseResource(
+			t,
+			resourceDoc("Allow", `"Principal":{"AWS":"`+c.principal+`"}`, bucketObjects),
+		)
+		if got := p.statements[0].principal.callerMatch(c.caller, c.partition); got != c.want {
+			t.Errorf(
+				"%s in partition %q for %s: %v, want %v",
+				c.principal,
+				c.partition,
+				c.caller.ARN,
+				got,
+				c.want,
+			)
+		}
+	}
+}
+
 // An IAM root ARN has a blank region and a 12-digit account ("IAM
 // identifiers").
 func TestIsRoot(t *testing.T) {
@@ -322,6 +378,39 @@ func TestIsRoot(t *testing.T) {
 		a, _ := parseARN(s)
 		if got := a.isRoot(); got != want {
 			t.Errorf("isRoot(%s) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// Caller.valid: the fields must agree with one another.
+func TestCallerValid(t *testing.T) {
+	with := func(c Caller, f func(*Caller)) Caller { f(&c); return c }
+	for name, c := range map[string]Caller{
+		"account id short":        with(devUser, func(c *Caller) { c.AccountID = "1234" }),
+		"arn of another account":  with(devUser, func(c *Caller) { c.AccountID = other }),
+		"root with a user arn":    with(root, func(c *Caller) { c.ARN = devUser.ARN }),
+		"root with a region":      with(root, func(c *Caller) { c.ARN = "arn:aws:iam:us-east-1:" + acct + ":root"; c.PrincipalARN = c.ARN }),
+		"root with a user id":     with(root, func(c *Caller) { c.UserID = devUser.UserID }),
+		"user with a role arn":    with(devUser, func(c *Caller) { c.ARN = session.PrincipalARN; c.PrincipalARN = c.ARN }),
+		"user principal arn":      with(devUser, func(c *Caller) { c.PrincipalARN = "arn:aws:iam::" + acct + ":user/other" }),
+		"user with a role id":     with(devUser, func(c *Caller) { c.UserID = "AROAREADEREXAMPLE0001" }),
+		"session with a user arn": with(session, func(c *Caller) { c.ARN = devUser.ARN }),
+		"session no session name": with(session, func(c *Caller) { c.ARN = "arn:aws:sts::" + acct + ":assumed-role/Reader" }),
+		"session other role":      with(session, func(c *Caller) { c.PrincipalARN = "arn:aws:iam::" + acct + ":role/ops/Writer" }),
+		"session role elsewhere":  with(session, func(c *Caller) { c.PrincipalARN = "arn:aws:iam::" + other + ":role/ops/Reader" }),
+		"session role partition":  with(session, func(c *Caller) { c.PrincipalARN = "arn:aws-cn:iam::" + acct + ":role/ops/Reader" }),
+		"session user id":         with(session, func(c *Caller) { c.UserID = devUser.UserID }),
+		"session id other name":   with(session, func(c *Caller) { c.UserID = "AROAREADEREXAMPLE0001:s2" }),
+		"empty type":              with(devUser, func(c *Caller) { c.Type = "" }),
+		"empty":                   {},
+	} {
+		if c.valid() {
+			t.Errorf("%s: valid %+v", name, c)
+		}
+	}
+	for _, c := range []Caller{devUser, session, orphan, root} {
+		if !c.valid() {
+			t.Errorf("invalid %+v", c)
 		}
 	}
 }
