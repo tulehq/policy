@@ -1300,6 +1300,74 @@ var rpPrincipalParseCases = []struct {
 		"arn:aws:s3:::" + rpAcct,
 		false,
 	},
+	{
+		"wildcard path",
+		docPrincipal,
+		rpWildcardStated,
+		"arn:aws:iam::" + rpAcct + ":role/*/admin",
+		false,
+	},
+	{
+		"wildcard name",
+		docPrincipal,
+		rpWildcardStated,
+		"arn:aws:iam::" + rpAcct + ":user/dev*",
+		false,
+	},
+	{
+		"single-character wildcard path",
+		docPrincipal,
+		rpWildcardStated,
+		"arn:aws:iam::" + rpAcct + ":role/?/r",
+		false,
+	},
+	{
+		"policy variable in a path",
+		docPrincipal,
+		"Principal is not among the elements that take variables",
+		"arn:aws:iam::" + rpAcct + ":user/${x}/bob",
+		false,
+	},
+	{
+		"empty path segment",
+		iamAPIUser,
+		"Path pattern (\\u002F)|(\\u002F[\\u0021-\\u007E]+\\u002F): no //",
+		"arn:aws:iam::" + rpAcct + ":user//bob",
+		false,
+	},
+	{
+		"empty segment inside a path",
+		iamAPIUser,
+		"the middle of a path is any printable ASCII, / included",
+		"arn:aws:iam::" + rpAcct + ":user/a//b/bob",
+		true,
+	},
+}
+
+const (
+	rpWildcardStated = "You cannot use a wildcard to match part of a principal name or ARN."
+	iamAPIUser       = "https://docs.aws.amazon.com/IAM/latest/APIReference/API_User.html"
+)
+
+// A wildcard in a principal is refused at parse in a Deny as in an Allow,
+// in every kind of policy, so a Deny can never silently name nothing.
+func TestConformancePrincipalWildcardRefused(t *testing.T) {
+	for _, principal := range []string{
+		"arn:aws:iam::" + rpAcct + ":role/*/r",
+		"arn:aws:iam::" + rpAcct + ":role/?/r",
+	} {
+		resource := `{"Version":"2012-10-17","Statement":[` +
+			`{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"*"},` +
+			`{"Effect":"Deny","Principal":{"AWS":"` + principal + `"},"Action":"s3:GetObject","Resource":"*"}]}`
+		_, err := policy.ParseResource([]byte(resource))
+		rpCheckParse(t, err, false, docPrincipal, rpWildcardStated)
+		trust := `{"Version":"2012-10-17","Statement":{"Effect":"Deny","Principal":{"AWS":"` + principal +
+			`"},"Action":"sts:AssumeRole"}}`
+		for _, parse := range []func([]byte) (*policy.Policy, error){policy.ParseTrust, policy.Parse} {
+			_, err := parse([]byte(trust))
+			rpCheckParse(t, err, false, docPrincipal, rpWildcardStated)
+		}
+	}
 }
 
 // Principal values in resource-based policies (ParseResource), and the
