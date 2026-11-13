@@ -148,8 +148,9 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   are ORed; a negated operator holds when no value matches (NOR).
 - A missing key: false, but true for a negated operator; true with
   `IfExists`; true for `ForAllValues`, false for `ForAnyValue`. For the set
-  operators a key whose only value is `""` counts as missing. `Null` with
-  `true` holds when the key is absent, with `false` when present.
+  operators an empty-string value is no value: `["", "x"]` is `["x"]`, and a
+  key whose values are all `""` counts as missing. `Null` with `true` holds
+  when the key is absent, with `false` when present.
 - `ForAnyValue` holds when at least one request value passes, `ForAllValues`
   when all do; a value passes a negated operator when it matches no policy
   value.

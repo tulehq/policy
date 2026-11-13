@@ -166,3 +166,23 @@ func TestTrustMatchDirectNeedsRoleAccount(t *testing.T) {
 		}
 	}
 }
+
+// For the set operators an empty-string value is no value, so ["", "!!"]
+// behaves as ["!!"]: junk, under which a Deny applies.
+func TestSetOperatorsDropEmptyValues(t *testing.T) {
+	allow := mustParse(t, allowAll)
+	deny := mustParse(t, condPolicy("Deny", `{"ForAllValues:BinaryEquals":{"k:v":"QQ=="}}`))
+	for _, vals := range [][]string{{""}, {"", "!!"}, {"!!"}} {
+		r := anyRequest(map[string][]string{"k:v": vals})
+		if got := Evaluate(r, allow, deny); got.Decision != ExplicitDeny {
+			t.Errorf("%q: Evaluate = %+v, want ExplicitDeny", vals, got)
+		}
+	}
+	forAny := mustParse(t, condPolicy("Allow", `{"ForAnyValue:StringEquals":{"k:v":""}}`))
+	if got := Evaluate(
+		anyRequest(map[string][]string{"k:v": {"", "x"}}),
+		forAny,
+	); got.Decision != ImplicitDeny {
+		t.Errorf("ForAnyValue matched an empty string: %+v", got)
+	}
+}

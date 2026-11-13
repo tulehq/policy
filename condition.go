@@ -169,7 +169,8 @@ type condition struct {
 // is not present, evaluate the condition element as true." ForAllValues
 // "also returns true if there are no context keys in the request", and
 // ForAnyValue returns false "if the key does not exist". For both set
-// operators a key whose only value is the empty string is a missing key:
+// operators an empty-string value is no value, and a key whose values are
+// all empty strings is a missing key:
 // ForAllValues "returns true if there are no context keys in the request
 // or if the context key value resolves to a null dataset, such as an empty
 // string."
@@ -221,10 +222,24 @@ func (c condition) precheck(rc *requestContext) (vals []string, present, decided
 	if c.op.base.kind == kindNull {
 		return nil, false, true, nullHolds(c.values, present)
 	}
-	if c.op.set != setNone && len(vals) == 1 && vals[0] == "" {
-		present = false
+	if c.op.set != setNone {
+		vals = withoutEmpty(vals)
+		present = len(vals) > 0
 	}
 	return vals, present, false, false
+}
+
+// withoutEmpty returns vals without its empty strings: for the set
+// operators "" is part of a null dataset, not a value, so ["", "x"] is
+// ["x"].
+func withoutEmpty(vals []string) []string {
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // missing is the result of the condition when its key is not present.
