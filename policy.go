@@ -1,6 +1,8 @@
 // Package policy parses AWS IAM policy documents and evaluates requests
 // against them with the logic AWS applies to identity-based policies within
-// one account, and evaluates role trust policies for AssumeRole.
+// one account (Evaluate), to role trust policies for AssumeRole
+// (TrustMatch), and to identity-based and resource-based policies together,
+// within one account and across accounts (Authorize).
 //
 // It depends on the standard library only. The rules it implements, and
 // the IAM User Guide page each comes from, are cited where they are
