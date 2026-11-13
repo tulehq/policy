@@ -1,9 +1,11 @@
 # policy
 
 A Go library that parses AWS IAM policy documents and evaluates requests
-against them with the logic AWS applies to identity-based policies within
-one account, for the Tule services that stand in for AWS ones. It also
-evaluates role trust policies for AssumeRole.
+against them with the logic AWS applies, for the Tule services that stand in
+for AWS ones: identity-based policies within one account (`Evaluate`), role
+trust policies for AssumeRole (`TrustMatch`), and identity-based and
+resource-based policies together, within one account and across accounts
+(`Authorize`).
 
 It depends on the standard library only, and has no Tule types. Every rule
 below is taken from the IAM User Guide and cited, with the page, in a
@@ -41,6 +43,25 @@ if res.Decision != policy.Allow {
 
 tr := policy.TrustMatch(trust, roleAccountID, "sts:AssumeRole", callerARN, ctx)
 // tr.Decision, and tr.Direct for whether an identity Allow is also needed.
+
+bucketPolicy, err := policy.ParseResource(doc) // refuse a bad one when it is stored
+az := policy.Authorize(policy.AuthorizeRequest{
+	Action:          "s3:GetObject",
+	Resource:        "arn:aws:s3:::bucket/key",
+	ResourceAccount: bucketAccountID,
+	Caller: policy.Caller{ // from sigv4's Principal
+		AccountID:    p.AccountID,
+		ARN:          p.ARN,
+		PrincipalARN: p.PrincipalARN,
+		UserID:       p.UserID,
+		Type:         policy.PrincipalType(p.Type),
+	},
+	Context: ctx,
+}, bucketPolicy, identityPolicies...) // bucketPolicy may be nil
+if az.Decision != policy.Allow {
+	// AccessDenied: "User: <arn> is not authorized to perform: <action> on
+	// resource: <arn> " + az.Reason.Message(action)
+}
 ```
 
 ## API
@@ -79,7 +100,39 @@ tr := policy.TrustMatch(trust, roleAccountID, "sts:AssumeRole", callerARN, ctx)
   account.
 - `AllowsPrincipal(trust *Policy, action, principalARN string, ctx
   map[string][]string) bool` is `TrustMatch(...).Decision == Allow`.
-- `ParseError{Message string}`, returned by `Parse` as `*ParseError`.
+- `ParseResource(doc []byte) (*Policy, error)` parses a resource-based
+  policy (bucket, queue, secret, function, email identity policy): each
+  statement needs `Principal` or `NotPrincipal` (reported first when
+  missing, `Missing required field Principal.`) and `Resource` or
+  `NotResource`. An `AWS` principal may also be a user (`AIDA...`) or role
+  (`AROA...`) unique ID; `Federated` is refused. Services may layer their
+  own checks, such as S3's requirement that `Resource` name the bucket.
+- `Caller{AccountID, ARN, PrincipalARN, UserID string; Type PrincipalType}`
+  describes the principal making a request, with the meanings of
+  tule.dev/sigv4 v0.4.1's `Principal` fields of the same names.
+  `PrincipalType` is `PrincipalTypeAccount` (`"Account"`, the root user),
+  `PrincipalTypeUser` (`"User"`) or `PrincipalTypeAssumedRole`
+  (`"AssumedRole"`). A role session with an empty `PrincipalARN` is a
+  session whose role was deleted.
+- `AuthorizeRequest{Action, Resource, ResourceAccount string; Caller Caller;
+  Context map[string][]string}`. `ResourceAccount` is the account ID that
+  owns the resource.
+- `Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy)
+  Authorization`. `resource` is the resource's resource-based policy, nil
+  when it has none; nil identity policies are skipped.
+- `Authorization{Decision Decision; Reason Reason; Identity, Resource
+  Result; Direct bool}`. `Identity` is the identity policies' result as
+  `Evaluate` gives it; `Resource` is the resource policy's (`Policy` 0, or
+  -1 when no statement decided); `Direct` is whether a resource-based Allow
+  named the caller other than through its account.
+- `Reason`: `NoReason` (the zero value, for an Allow), `IdentityDeny`,
+  `ResourceDeny`, `NoIdentityAllow`, `NoResourceAllow`, with `String()` and
+  `Message(action string) string`, the phrase AWS ends its AccessDenied
+  message with: `with an explicit deny in an identity-based policy`, `with
+  an explicit deny in a resource-based policy`, `because no identity-based
+  policy allows the <action> action`, `because no resource-based policy
+  allows the <action> action` (`troubleshoot_access-denied.html`).
+- `ParseError{Message string}`, returned by the parsers as `*ParseError`.
 
 ## Semantics and sources
 
@@ -217,6 +270,107 @@ logic evaluates requests to allow or deny access",
 `reference_policies_evaluation-logic_policy-eval-denyallow.html`); applying
 that rule is the caller's.
 
+**Resource-based policies with identity-based ones**
+(`reference_policies_evaluation-logic_policy-eval-denyallow.html`,
+`reference_policies_evaluation-logic.html`,
+`reference_policies_evaluation-logic_policy-eval-basics.html`,
+`reference_policies_evaluation-logic-cross-account.html`). `Authorize`
+decides in this order:
+
+1. An identity-based Deny that applies denies (`IdentityDeny`), then a
+   resource-based Deny (`ResourceDeny`): "If the enforcement code finds even
+   one explicit deny that applies, the enforcement code returns a final
+   decision of Deny." When both deny, AWS names "only one of those policy
+   types" (`troubleshoot_access-denied.html`) without saying which; naming
+   the identity-based one is this package's choice.
+2. Within one account (`Caller.AccountID` is `ResourceAccount`), an
+   identity-based Allow allows ("If either the identity-based policy or the
+   resource-based policy within the same account allows the request and the
+   other doesn't, the request is still allowed."), and so does a direct
+   resource-based Allow: one that names the caller by `"*"`, its user ARN or
+   ID, its role's ARN or ID, or its session ARN. "If a resource-based policy
+   grants permission directly to the IAM user or the session principal that
+   is making the request, then an implicit deny in an identity-based policy
+   ... does not impact the final decision." A grant to a role ARN reaches
+   the role's sessions ("You can specify the role ARN in the Principal
+   element ... the principal that makes the request is the IAM role
+   session") and is "limited by an implicit deny in a permissions boundary
+   or session policy", not by the identity-based policies; neither limit is
+   evaluated here, so the grant stands alone. A grant that names the caller
+   only by its account ID or root ARN "delegates authority to the account"
+   (`reference_policies_elements_principal.html`) and also needs an
+   identity-based Allow. Otherwise the reason is `NoIdentityAllow` (that AWS
+   names the identity-based type here is this package's choice).
+3. Across accounts, "The request is allowed only if both evaluations return
+   a decision of Allow": an identity-based Allow (else `NoIdentityAllow`)
+   and a resource-based Allow of any kind (else `NoResourceAllow`). A
+   `"*"` grant reaches another account's principals only with "identity-based
+   permissions in their account". A `ResourceAccount` that is not a 12-digit
+   ID is never the caller's account, so both allows are needed.
+
+The root user (`PrincipalTypeAccount`) has an identity-based Allow without
+policies ("with the exception of the AWS account root user, which has full
+access"), so another account's root needs only the resource-based grant.
+`Authorize` applies no other root rule: a service that never evaluates its
+own account's root keeps doing so before calling it. A resource-based Deny
+does apply to a root caller passed in.
+
+**Resource-based principals** (`reference_policies_elements_principal.html`,
+`reference_identifiers.html`). A resource-based statement applies when its
+action, resource and conditions match and its `Principal` names the caller
+(or its `NotPrincipal` does not exempt it). A statement without a
+`Principal` or `NotPrincipal`, or without a `Resource` or `NotResource`,
+never applies, and the identity side never applies a statement with a
+`Principal`. Values match as follows, by ARN, names case-sensitively:
+
+- `"*"` and `{"AWS":"*"}`: every caller, directly.
+- An account ID or `arn:PARTITION:iam::ACCOUNT:root`: every caller of that
+  account (of that partition, for the ARN), through the account.
+- `arn:...:iam::ACCOUNT:user/PATH/NAME`: the IAM user with that `ARN`.
+- `arn:...:iam::ACCOUNT:role/PATH/NAME`: a role session whose
+  `PrincipalARN` is that ARN, path included (a role ARN is
+  `role/role-name-with-path`, `reference_identifiers.html`).
+- `arn:...:sts::ACCOUNT:assumed-role/NAME/SESSION`: the session with that
+  `ARN`.
+- `AIDA...`: the IAM user with that `UserID`; `AROA...`: a session of that
+  role, whose `UserID` is `<role ID>:<session name>` ("You can create
+  resource-based policies that grant access by unique ID";
+  `reference_identifiers.html`). The format accepted at parse, upper-case
+  letters and digits, 16 to 128 characters (the IAM API's `UserId` and
+  `RoleId` lengths), is this package's choice.
+- Service, CanonicalUser and federated-user values match no caller.
+- **A session whose role was deleted** (`Type` AssumedRole, empty
+  `PrincipalARN`) matches nothing that names the role: not the role ARN,
+  not its session ARN, not the role ID. It still matches `"*"` and its
+  account, and `aws:PrincipalArn` is absent for it, so a condition on the
+  role ARN does not hold for it, and an `ArnNotEquals` Deny on it applies.
+  This is the rule tule.dev/sigv4 v0.4.1 states for `Principal.PrincipalARN`.
+  AWS reaches the same end through unique IDs: "if you delete the role,
+  then you break the relationship. The policy no longer applies".
+- A `Caller` whose `Type` is none of the three matches only `"*"` and its
+  account.
+
+`NotPrincipal` (`reference_policies_elements_notprincipal.html`): "When you
+use NotPrincipal, you must also specify the account ARN of the not-denied
+principal. Otherwise, the policy might deny access to the entire account
+... AWS might validate the account first, then the role, and then the
+assumed-role user." AWS leaves the exact rule to each service. This
+package's choice is the strict reading: the caller is exempt from the Deny
+only when the element names its account and, unless it is the root user,
+the caller itself as `Principal` would (its user ARN or ID, its role's ARN
+or ID, or its session ARN), or when the element is `"*"`. So `NotPrincipal`
+with a user ARN alone, or a role ARN alone, denies that user or session,
+and a session whose role was deleted is never exempt but by `"*"`.
+
+**Request context in `Authorize`.** `aws:PrincipalArn`,
+`aws:PrincipalAccount`, `aws:userid` and `aws:PrincipalType` come from the
+`Caller` (`PrincipalARN`, `AccountID`, `UserID`, `Type`) and replace any
+value `Context` gives them; an empty field makes its key absent, and none
+is derived from `Caller.ARN`. That is this package's choice, so that a
+service cannot derive a deleted role's ARN for its session by mistake.
+`aws:username` is still derived from a user's ARN when `Context` lacks it;
+`aws:PrincipalTag/*` and every other key come from `Context` only.
+
 **Matching cost.** Wildcard patterns are matched by simulating the pattern
 as an automaton, in O(pattern × input) time and O(pattern) space whatever
 the number of wildcards; no input backtracks exponentially. A condition
@@ -254,9 +408,30 @@ text for those faults is not documented.
 
 ## Known gaps
 
-- Only identity-based policies within one account and trust policies.
-  Resource-based policies, permissions boundaries, session policies, SCPs,
-  RCPs and cross-account evaluation are not implemented.
+- Permissions boundaries, session policies, SCPs and RCPs are not
+  evaluated, by `Authorize` or otherwise. Where AWS lets them limit a
+  resource-based grant (a grant to a role ARN, or one through
+  `aws:PrincipalArn`), the grant here is unlimited.
+- AWS converts a user or role ARN in a stored resource-based policy to the
+  principal's unique ID, so a principal recreated under the same name does
+  not inherit the grant. `Authorize` matches by ARN, so a recreated user or
+  role does inherit it, until identity can resolve unique IDs for the
+  services. A session whose role was deleted is the exception: it matches
+  nothing that names the role (see Resource-based principals).
+- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied
+  (identity does not carry the organization), so a condition on them never
+  holds, and a negated one always does.
+- Service principals never match a Tule caller, and neither do
+  CanonicalUser or federated-user values; S3 ACL grantees are not
+  evaluated.
+- Some services require an explicit resource-based Allow within one
+  account ("Resource-based policies for services other than IAM and AWS KMS
+  may also require an explicit Allow statement within the same account";
+  `reference_policies_evaluation-logic_policy-eval-denyallow.html`);
+  `Authorize` applies the general rule, and such a service must check
+  `Authorization.Resource` itself.
+- Root-user exceptions that a service makes to its resource-based
+  policies are the service's to apply.
 - Actions are not checked against a service's real action list, and a
   resource's applicability to an action is not known: `NotAction` with
   `Resource: "*"` covers every action of every service.
@@ -307,7 +482,9 @@ text for those faults is not documented.
 make fmt    # format
 make lint   # golangci-lint, v2.15.0 in CI
 make test   # go test -race ./...
-go test -run '^$' -fuzz FuzzParse -fuzztime 30s    # also FuzzGlob, FuzzEvaluate
+go test -run '^$' -fuzz '^FuzzParse$' -fuzztime 30s
+# also FuzzGlob, FuzzEvaluate, FuzzJunkNeverGrants, FuzzParseResource,
+# FuzzAuthorize and FuzzConformanceParse
 ```
 
 ## License
