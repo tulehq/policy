@@ -231,7 +231,7 @@ func (c condition) holds(vars bool, rc *requestContext, deny bool) bool {
 // value has a variable naming an unknown key. Variables count only where
 // the operator replaces them.
 func (c condition) unknown(vars bool, rc *requestContext) bool {
-	if len(rc.unknown) == 0 {
+	if !rc.hasUnknown() {
 		return false
 	}
 	if rc.isUnknown(c.key) {

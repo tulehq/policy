@@ -56,10 +56,14 @@ type Request struct {
 	// determine, such as aws:PrincipalOrgID when the organization service
 	// cannot be reached. A condition that tests an unknown key, or a
 	// condition value or Resource entry whose policy variable names one,
-	// takes the result worse for the caller: it never holds (or matches)
-	// in an Allow statement and always does in a Deny statement. Names
-	// match case-insensitively, and an unknown key is unknown whatever
-	// Context or Principal gives it.
+	// takes the result worse for the caller: such a condition never holds
+	// in an Allow statement and always holds in a Deny statement, and such
+	// an entry is dropped or counts as "*", whichever makes the statement
+	// not apply in an Allow and apply in a Deny. Names match
+	// case-insensitively. A name ending in "/", such as
+	// "aws:PrincipalTag/", marks every key it prefixes; every other name is
+	// one exact key, and names are not patterns. An unknown key is unknown
+	// whatever Context or Principal gives it.
 	Unknown []string
 }
 
@@ -295,22 +299,25 @@ func (s *statement) matchesAction(action string) bool {
 // variable has no value matches no resource, so it excludes none under
 // NotResource.
 //
-// An entry whose variable names an unknown key (see Request.Unknown)
-// decides the whole element against the caller, Resource or NotResource:
-// the statement's resource never matches in an Allow statement and always
-// matches in a Deny statement, whatever the other entries say. This is
-// this package's choice, as for malformed request values (see
-// condition.holds).
+// An entry whose variable names an unknown key (see Request.Unknown) is
+// decided on its own, against the caller: it is "*" where matching it
+// makes the statement apply (Resource in a Deny statement, NotResource in
+// an Allow statement), and it is dropped where matching it would make the
+// statement apply (Resource in an Allow, NotResource in a Deny). The other
+// entries match as usual. This is this package's choice, as for malformed
+// request values (see condition.holds).
 func (s *statement) matchesResource(resource string, vars bool, rc *requestContext) bool {
 	if !s.hasResource {
 		return false
 	}
+	unknownIsStar := (s.effect == effectDeny) != s.notResource
 	for _, raw := range s.resources {
-		if resourceUnknown(raw, vars, rc) {
-			return s.effect == effectDeny
+		if rc.hasUnknown() && resourceUnknown(raw, vars, rc) {
+			if unknownIsStar {
+				return !s.notResource
+			}
+			continue
 		}
-	}
-	for _, raw := range s.resources {
 		if p, ok := resourcePattern(raw, vars, rc); ok && p.match(resource, false) {
 			return !s.notResource
 		}

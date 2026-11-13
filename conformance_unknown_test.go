@@ -8,6 +8,7 @@ package policy_test
 // a key the service could not determine never grants and always denies.
 
 import (
+	"strings"
 	"testing"
 
 	"tule.dev/policy"
@@ -137,12 +138,53 @@ var cfUnknownCases = []cfUnknown{
 		name: "Allow Resource with a variable naming an unknown key",
 		src:  docVariables,
 		stated: "the resource that includes a policy variable with no value will not match any " +
-			"resource. CHOICE: an unknown variable does the same in an Allow, whatever other entries say",
+			"resource. CHOICE: an unknown variable's entry does the same in an Allow",
+		policy: `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"*",` +
+			`"Resource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::c/*"]}}`,
+		res:     "arn:aws:s3:::b/o-1/k",
+		unknown: []string{cfOrg},
+		want:    policy.ImplicitDeny,
+	},
+	{
+		name:   "Allow Resource with a variable naming an unknown key, another entry matching",
+		src:    docResource,
+		stated: "CHOICE: each entry is decided on its own; the entry without the variable matches as usual",
 		policy: `{"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"*",` +
 			`"Resource":["arn:aws:s3:::b/${aws:PrincipalOrgID}/*","arn:aws:s3:::b/*"]}}`,
 		res:     "arn:aws:s3:::b/o-1/k",
 		unknown: []string{cfOrg},
-		want:    policy.ImplicitDeny,
+		want:    policy.Allow,
+	},
+	{
+		name: "Deny NotResource with a variable naming an unknown key",
+		src:  docNotResource,
+		stated: "NotResource explicitly matches every resource except those specified. " +
+			"CHOICE: an unknown variable's entry excludes nothing from a Deny",
+		policy: `{"Version":"2012-10-17","Statement":{"Effect":"Deny","Action":"*",` +
+			`"NotResource":"arn:aws:s3:::b/${aws:PrincipalOrgID}/*"}}`,
+		res:     "arn:aws:s3:::b/o-1/k",
+		ctx:     cfCtx{cfOrg: {"o-1"}},
+		unknown: []string{cfOrg},
+		want:    policy.ExplicitDeny,
+	},
+	{
+		name: "Deny on a tag family marked unknown",
+		src:  docCondKeys,
+		stated: "aws:PrincipalTag/tag-key. CHOICE: a name ending in / marks every key it prefixes; " +
+			"the Deny applies",
+		policy:  cfUnknownDeny(`{"StringEquals":{"aws:PrincipalTag/team":"intern"}}`),
+		ctx:     cfCtx{"aws:PrincipalTag/team": {"staff"}},
+		unknown: []string{"aws:PrincipalTag/"},
+		want:    policy.ExplicitDeny,
+	},
+	{
+		name:    "An unknown name that is not a family is exact",
+		src:     docCondKeys,
+		stated:  "CHOICE: names are not patterns; aws:PrincipalTag/* names no key the policy tests",
+		policy:  cfUnknownDeny(`{"StringEquals":{"aws:PrincipalTag/team":"intern"}}`),
+		ctx:     cfCtx{"aws:PrincipalTag/team": {"staff"}},
+		unknown: []string{"aws:PrincipalTag/*"},
+		want:    policy.Allow,
 	},
 	{
 		name: "Deny Resource with a variable naming an unknown key",
@@ -191,7 +233,7 @@ func TestConformanceUnknownKeys(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			p := cfParse(t, c.policy)
 			pols := []*policy.Policy{p}
-			if c.want == policy.ExplicitDeny {
+			if strings.Contains(c.policy, `"Deny"`) {
 				pols = []*policy.Policy{allowAll, p}
 			}
 			req := policy.Request{
