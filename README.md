@@ -584,13 +584,15 @@ text for those faults is not documented.
   `aws:PrincipalArn`), the grant here is unlimited.
 - AWS converts a user or role ARN in a stored resource-based policy to the
   principal's unique ID, so a principal recreated under the same name does
-  not inherit the grant. `Authorize` matches by ARN, so a recreated user or
-  role does inherit it, until identity can resolve unique IDs for the
-  services. A session whose role was deleted is the exception: `Authorize`
-  refuses it.
-- `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied
-  (identity does not carry the organization), so a condition on them never
-  holds, and a negated one always does.
+  not inherit the grant. This library matches what it is given: an ARN by
+  ARN, and an `AIDA` or `AROA` unique ID by the caller's `UserID`. Binding
+  ARNs to unique IDs when a policy is stored is the caller's; the Tule
+  services do it through identity's `principals` client. A session whose
+  role was deleted is refused by `Authorize` whatever the policy names.
+- This library supplies no condition keys of its own beyond those it takes
+  from the `Caller`: `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`, like
+  every other key, come from the caller's `Context`, and a caller that
+  cannot tell their values passes them in `Unknown`.
 - Service principals never match a Tule caller, and neither do
   CanonicalUser or federated-user values; S3 ACL grantees are not
   evaluated.
