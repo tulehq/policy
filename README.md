@@ -154,8 +154,9 @@ the root user, `aws:userid` are derived from `Request.Principal` when
 - `ForAnyValue` holds when at least one request value passes, `ForAllValues`
   when all do; a value passes a negated operator when it matches no policy
   value.
-- Numbers are decimal (sign, digits, fraction, exponent) and compared as
-  float64. Dates are the W3C ISO 8601 profile or epoch seconds. IP values are
+- Numbers are decimal (sign, digits, fraction, exponent up to ±400) and
+  compared exactly, as rationals, so `100.000000000000001` is greater than
+  `100`. Dates are the W3C ISO 8601 profile or epoch seconds. IP values are
   CIDR, a bare address being /32 (or /128 for IPv6). Binary values are
   base64 on both sides, compared decoded. `ArnLike` checks the six fields
   separately, each with `*` and `?`.
@@ -269,7 +270,6 @@ text for those faults is not documented.
   their values.
 - An all-digits date is epoch seconds, so the W3C year-only form (`YYYY`) is
   not available. Epoch seconds outside years 0000 to 9999 are invalid.
-- Numbers compare as float64, so integers beyond 2^53 lose precision.
 - A role ARN with a path is matched against its sessions by name; the role
   ARN derived for `aws:PrincipalArn` from a session ARN has no path. Pass
   `aws:PrincipalArn` in the context for roles with paths.

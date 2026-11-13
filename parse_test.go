@@ -128,6 +128,10 @@ var parseErrors = []struct{ doc, msg string }{
 		"Condition operator ForEachValue:StringEquals is not valid.",
 	},
 	{
+		cond(`{"NumericEquals":{"k:n":"1e999"}}`),
+		"Condition value 1e999 is not valid for NumericEquals.",
+	},
+	{
 		cond(`{"NumericNotEquals":{"k:n":"ten"}}`),
 		"Condition value ten is not valid for NumericNotEquals.",
 	},

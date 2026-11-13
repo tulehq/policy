@@ -2,8 +2,8 @@ package policy
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/base64"
+	"math/big"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -35,7 +35,7 @@ func compileValues(b baseOp, raw []string, vars bool, rc *requestContext) (match
 	case kindBool:
 		return boolMatcher(raw, vars, rc)
 	case kindNumeric:
-		return orderedMatcher(raw, parseNumber, cmp.Compare[float64], b.order)
+		return orderedMatcher(raw, parseNumber, (*big.Rat).Cmp, b.order)
 	case kindDate:
 		return orderedMatcher(raw, parseDate, time.Time.Compare, b.order)
 	case kindBinary:
@@ -211,14 +211,20 @@ func inOrder(c int, o order) bool {
 // parseNumber parses "an integer or decimal value" (operators page,
 // "Numeric condition operators"): an optional sign, digits with an optional
 // fraction, and an optional exponent. Hexadecimal, Inf and NaN are not
-// numbers here, and values compare as float64.
-func parseNumber(s string) (float64, bool) {
+// numbers here. Values compare exactly, as rationals parsed from their
+// decimal text, so 100.000000000000001 is greater than 100 and 1e-400 is
+// not 0. An exponent beyond maxExponent in magnitude makes the value
+// invalid, which bounds the cost of the exact value.
+func parseNumber(s string) (*big.Rat, bool) {
 	if !isDecimal(s) {
-		return 0, false
+		return nil, false
 	}
-	f, err := strconv.ParseFloat(s, 64)
-	return f, err == nil
+	return new(big.Rat).SetString(s)
 }
+
+// maxExponent bounds a number's decimal exponent. It is beyond float64's
+// range (about 1e±308), so every number AWS can mean is within it.
+const maxExponent = 400
 
 func isDecimal(s string) bool {
 	mant, exp, hasExp := strings.Cut(strings.ToLower(trimSign(s)), "e")
@@ -226,8 +232,12 @@ func isDecimal(s string) bool {
 	if whole == "" && frac == "" || !digits(whole) || !digits(frac) {
 		return false
 	}
-	exp = trimSign(exp)
-	return !hasExp || exp != "" && digits(exp)
+	if !hasExp {
+		return true
+	}
+	e, err := strconv.Atoi(exp)
+	return err == nil && digits(trimSign(exp)) && trimSign(exp) != "" && e >= -maxExponent &&
+		e <= maxExponent
 }
 
 func trimSign(s string) string {

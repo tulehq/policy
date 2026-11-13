@@ -201,3 +201,40 @@ func TestResourcePrefixVariableIsLiteral(t *testing.T) {
 		t.Errorf("literal ${*}: %+v, want ExplicitDeny", got)
 	}
 }
+
+// Numbers compare exactly, not as float64.
+var exactNumberCases = []evalCase{
+	{
+		"LTE 100 vs 100.000000000000001",
+		[]string{condPolicy("Allow", `{"NumericLessThanEquals":{"s3:max-keys":"100"}}`)},
+		anyRequest(ctx("s3:max-keys", "100.000000000000001")), ImplicitDeny,
+	},
+	{
+		"Deny GT 100 vs 100.000000000000001",
+		[]string{allowAll, condPolicy("Deny",
+			`{"NumericGreaterThan":{"s3:max-keys":"100"}}`)},
+		anyRequest(ctx("s3:max-keys", "100.000000000000001")), ExplicitDeny,
+	},
+	{
+		"1e-400 is not 0",
+		[]string{condPolicy("Allow", `{"NumericEquals":{"k:v":"0"}}`)},
+		anyRequest(ctx("k:v", "1e-400")), ImplicitDeny,
+	},
+	{
+		"2^53 < 2^53+1",
+		[]string{condPolicy("Allow", `{"NumericLessThan":{"k:v":"9007199254740993"}}`)},
+		anyRequest(ctx("k:v", "9007199254740992")), Allow,
+	},
+	{
+		"equal decimals",
+		[]string{condPolicy("Allow", `{"NumericEquals":{"k:v":"1.50"}}`)},
+		anyRequest(ctx("k:v", "15e-1")), Allow,
+	},
+	{
+		"exponent beyond bound is invalid",
+		[]string{allowAll, condPolicy("Deny", `{"NumericLessThan":{"k:v":"1"}}`)},
+		anyRequest(ctx("k:v", "1e401")), ExplicitDeny,
+	},
+}
+
+func TestExactNumbers(t *testing.T) { runEvalCases(t, exactNumberCases) }
