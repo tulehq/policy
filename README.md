@@ -355,10 +355,11 @@ never applies, and the identity side never applies a statement with a
 
 - `"*"` and `{"AWS":"*"}`: every caller, directly.
 - An account ID or `arn:PARTITION:iam::ACCOUNT:root`: every caller of that
-  account and partition, through the account. An account ID names the
-  account in the resource's partition, so it matches nothing when the
-  resource is not an ARN ("You cannot delegate access between accounts in
-  different partitions."; `reference_identifiers.html`).
+  account, through the account. An account ID matches a caller whose
+  `AccountID` it is; a root ARN, a caller whose `ARN` has its partition and
+  account. Neither depends on the request's resource, which need not be an
+  ARN (`"*"` for ListBuckets, ListQueues or ListSecrets), so an account Deny
+  applies there too.
 - `arn:...:iam::ACCOUNT:user/PATH/NAME`: the IAM user with that `ARN`.
 - `arn:...:iam::ACCOUNT:role/PATH/NAME`: a role session whose
   `PrincipalARN` is that ARN, path included (a role ARN is

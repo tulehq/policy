@@ -119,7 +119,7 @@ func TestCallerMatch(t *testing.T) {
 				t,
 				resourceDoc("Allow", `"Principal":`+c.principal, bucketObjects),
 			)
-			if got := p.statements[0].principal.callerMatch(c.caller, "aws"); got != c.want {
+			if got := p.statements[0].principal.callerMatch(c.caller); got != c.want {
 				t.Fatalf("callerMatch = %v, want %v", got, c.want)
 			}
 		})
@@ -170,7 +170,7 @@ func TestExcludes(t *testing.T) {
 				t,
 				resourceDoc("Deny", `"NotPrincipal":`+c.principal, bucketObjects),
 			)
-			if got := p.statements[0].principal.excludes(c.caller, "aws"); got != c.want {
+			if got := p.statements[0].principal.excludes(c.caller); got != c.want {
 				t.Fatalf("excludes = %v, want %v", got, c.want)
 			}
 		})
@@ -325,9 +325,8 @@ func TestAuthorizeIgnoresOtherKinds(t *testing.T) {
 	}
 }
 
-// An account ID names the account in the resource's partition, and a root
-// ARN the account in its own partition; either matches a caller of that
-// partition only.
+// An account ID matches a caller of that account, and a root ARN a caller
+// whose ARN has its partition and account; neither looks at the resource.
 func TestAccountPrincipalPartition(t *testing.T) {
 	cn := Caller{
 		AccountID:    acct,
@@ -337,30 +336,23 @@ func TestAccountPrincipalPartition(t *testing.T) {
 		Type:         PrincipalTypeUser,
 	}
 	for _, c := range []struct { //nolint:govet // fieldalignment: field order reads as the rows do.
-		principal, partition string
-		caller               Caller
-		want                 matchKind
+		principal string
+		caller    Caller
+		want      matchKind
 	}{
-		{acct, "aws", devUser, matchAccount},
-		{acct, "aws-cn", devUser, matchNone},
-		{acct, "aws-cn", cn, matchAccount},
-		{acct, "", devUser, matchNone},
-		{"arn:aws:iam::" + acct + ":root", "aws", cn, matchNone},
-		{"arn:aws-cn:iam::" + acct + ":root", "aws", cn, matchAccount},
+		{acct, devUser, matchAccount},
+		{acct, cn, matchAccount},
+		{other, devUser, matchNone},
+		{"arn:aws:iam::" + acct + ":root", devUser, matchAccount},
+		{"arn:aws:iam::" + acct + ":root", cn, matchNone},
+		{"arn:aws-cn:iam::" + acct + ":root", cn, matchAccount},
 	} {
 		p := mustParseResource(
 			t,
 			resourceDoc("Allow", `"Principal":{"AWS":"`+c.principal+`"}`, bucketObjects),
 		)
-		if got := p.statements[0].principal.callerMatch(c.caller, c.partition); got != c.want {
-			t.Errorf(
-				"%s in partition %q for %s: %v, want %v",
-				c.principal,
-				c.partition,
-				c.caller.ARN,
-				got,
-				c.want,
-			)
+		if got := p.statements[0].principal.callerMatch(c.caller); got != c.want {
+			t.Errorf("%s for %s: %v, want %v", c.principal, c.caller.ARN, got, c.want)
 		}
 	}
 }

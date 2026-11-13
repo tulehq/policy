@@ -314,13 +314,8 @@ func evaluateResource(
 	if p == nil {
 		return res, false
 	}
-	// The partition an account ID principal names: the resource's.
-	partition := ""
-	if a, ok := parseARN(resource); ok {
-		partition = a.partition
-	}
 	for _, s := range p.statements {
-		kind, applies := s.grants(action, resource, partition, caller, p.vars, rc)
+		kind, applies := s.grants(action, resource, caller, p.vars, rc)
 		if !applies {
 			continue
 		}
@@ -339,7 +334,7 @@ func evaluateResource(
 // request, and how its Principal named the caller (matchNone under
 // NotPrincipal).
 func (s *statement) grants(
-	action, resource, partition string,
+	action, resource string,
 	caller Caller,
 	vars bool,
 	rc *requestContext,
@@ -349,10 +344,10 @@ func (s *statement) grants(
 	}
 	kind := matchNone
 	if s.notPrincipal {
-		if s.principal.excludes(caller, partition) {
+		if s.principal.excludes(caller) {
 			return matchNone, false
 		}
-	} else if kind = s.principal.callerMatch(caller, partition); kind == matchNone {
+	} else if kind = s.principal.callerMatch(caller); kind == matchNone {
 		return matchNone, false
 	}
 	return kind, s.conditionsHold(vars, rc)
@@ -371,13 +366,13 @@ func (s *statement) grants(
 //     anonymous users (public access). For IAM users and role principals
 //     within your account, no other permissions are required."
 //   - An account ID, or arn:partition:iam::account:root, matches every
-//     caller of that account and partition through the account: "The
-//     account ARN and the shortened account ID behave the same way. Both
-//     delegate permissions to the account." An account ID carries no
-//     partition, so it names the account in the resource's partition
-//     (partition; none when the resource is not an ARN): "You cannot
-//     delegate access between accounts in different partitions." ("IAM
-//     identifiers").
+//     caller of that account through the account: "The account ARN and the
+//     shortened account ID behave the same way. Both delegate permissions
+//     to the account." An account ID matches a caller whose AccountID it
+//     is; a root ARN, a caller whose ARN has its partition and account.
+//     Neither depends on the request's resource, which need not be an ARN
+//     (such as "*" for a List action). The caller's partition is its ARN's,
+//     which Caller.valid has checked.
 //   - A user ARN matches the IAM user (Type User) with that ARN.
 //   - A role ARN matches a session of the role (Type AssumedRole) whose
 //     PrincipalARN is that ARN, path included: "You can specify the role
@@ -393,21 +388,21 @@ func (s *statement) grants(
 //   - Service, CanonicalUser and Federated values, federated-user session
 //     ARNs and other ARNs match no caller: no Caller is a service, a
 //     canonical user or a federated user.
-func (p *principals) callerMatch(c Caller, partition string) matchKind {
+func (p *principals) callerMatch(c Caller) matchKind {
 	if p.all {
 		return matchDirect
 	}
 	best := matchNone
 	for _, id := range p.byType["AWS"] {
-		best = max(best, awsCallerMatch(id, c, partition))
+		best = max(best, awsCallerMatch(id, c))
 	}
 	return best
 }
 
-func awsCallerMatch(id string, c Caller, partition string) matchKind {
+func awsCallerMatch(id string, c Caller) matchKind {
 	switch {
 	case isAccountID(id):
-		return kindIf(accountMatches(partition, id, c), matchAccount)
+		return kindIf(c.AccountID == id, matchAccount)
 	case isUniqueID(id):
 		return kindIf(uniqueIDMatches(id, c), matchDirect)
 	}
@@ -416,17 +411,18 @@ func awsCallerMatch(id string, c Caller, partition string) matchKind {
 	case !ok:
 		return matchNone
 	case a.isRoot():
-		return kindIf(accountMatches(a.partition, a.account, c), matchAccount)
+		return kindIf(rootMatches(a, c), matchAccount)
 	default:
 		return kindIf(identityARNMatches(a, id, c), matchDirect)
 	}
 }
 
-// accountMatches reports whether the caller is in the account account of
-// partition, by the account and the partition of its ARN.
-func accountMatches(partition, account string, c Caller) bool {
+// rootMatches reports whether the root ARN a names the caller's account:
+// its partition and account are those of the caller's ARN, which
+// Caller.valid has checked against AccountID.
+func rootMatches(a arn, c Caller) bool {
 	ca, ok := parseARN(c.ARN)
-	return ok && partition != "" && ca.partition == partition && c.AccountID == account
+	return ok && ca.partition == a.partition && c.AccountID == a.account
 }
 
 // kindIf is kind when cond holds, else matchNone.
@@ -481,13 +477,13 @@ func uniqueIDMatches(id string, c Caller) bool {
 //   - for a role session, the role, by its ARN or unique ID. The session's
 //     own ARN does not count: it names the session, not the role the page
 //     says to list.
-func (p *principals) excludes(c Caller, partition string) bool {
+func (p *principals) excludes(c Caller) bool {
 	if p.all {
 		return true
 	}
 	account, self := false, false
 	for _, id := range p.byType["AWS"] {
-		kind := awsCallerMatch(id, c, partition)
+		kind := awsCallerMatch(id, c)
 		account = account || kind == matchAccount
 		self = self || kind == matchDirect && !isSessionARN(id)
 	}
