@@ -150,7 +150,8 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   never because the policy is malformed.
 - **Malformed request values never grant and always deny.** A request
   value that is invalid for its operator (`"abc"` for a Numeric operator, a
-  non-ARN for an ARN operator) is neither a match nor a non-match: it takes the result
+  non-ARN for an ARN operator, an epoch outside years 0000 to 9999 for a
+  Date operator) is neither a match nor a non-match: it takes the result
   worse for the caller. In an Allow statement it never helps the condition
   hold; in a Deny statement it always counts toward the condition holding.
   This holds under every operator, plain, negated, `ForAnyValue` and
@@ -219,7 +220,7 @@ text for those faults is not documented.
 - Context keys that differ only by case are merged into one key with all
   their values.
 - An all-digits date is epoch seconds, so the W3C year-only form (`YYYY`) is
-  not available.
+  not available. Epoch seconds outside years 0000 to 9999 are invalid.
 - Numbers compare as float64, so integers beyond 2^53 lose precision.
 - A role ARN with a path is matched against its sessions by name; the role
   ARN derived for `aws:PrincipalArn` from a session ARN has no path. Pass

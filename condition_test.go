@@ -417,3 +417,87 @@ func TestJunkValueDoesNotDisableDeny(t *testing.T) {
 		}
 	}
 }
+
+// Epoch seconds outside years 0000 to 9999 are invalid dates.
+var epochBoundCases = []condCase{
+	{
+		"max year epoch",
+		`{"DateEquals":{"k:t":"9999-12-31T23:59:59Z"}}`,
+		ctx("k:t", "253402300799"),
+		true,
+	},
+	{
+		"year 10000 epoch invalid",
+		`{"DateGreaterThan":{"k:t":"9999-12-31T23:59:59Z"}}`,
+		ctx("k:t", "253402300800"),
+		false,
+	},
+	{
+		"MaxInt64 epoch invalid",
+		`{"DateGreaterThan":{"k:t":"2026-01-01"}}`,
+		ctx("k:t", "9223372036854775807"),
+		false,
+	},
+	{
+		"MinInt64 invalid",
+		`{"DateLessThan":{"k:t":"2026-01-01"}}`,
+		ctx("k:t", "-9223372036854775808"),
+		false,
+	},
+	{
+		"year 0000",
+		`{"DateLessThan":{"k:t":"0001-01-01"}}`,
+		ctx("k:t", "0000-06-01T00:00:00Z"),
+		true,
+	},
+}
+
+func TestEpochBounds(t *testing.T) {
+	runCondCases(t, epochBoundCases)
+	allow := mustParse(t, allowAll)
+	for _, v := range []string{"9223372036854775807", "-9223372036854775808", "253402300800"} {
+		deny := mustParse(t, condPolicy("Deny", `{"DateLessThan":{"k:t":"2026-01-01"}}`))
+		if got := Evaluate(anyRequest(ctx("k:t", v)), allow, deny); got.Decision != ExplicitDeny {
+			t.Errorf("Deny on epoch %s: %+v, want ExplicitDeny", v, got)
+		}
+	}
+}
+
+// Dates outside the years that int64 nanoseconds cover (about 1678 to 2262)
+// still compare correctly.
+var extremeDateCases = []condCase{
+	{
+		"year 1 before 2026", `{"DateLessThan":{"aws:CurrentTime":"2026-01-01T00:00:00Z"}}`,
+		ctx("aws:CurrentTime", "0001-01-01T00:00:00Z"), true,
+	},
+	{
+		"year 9999 after 2026", `{"DateGreaterThan":{"aws:CurrentTime":"2026-01-01T00:00:00Z"}}`,
+		ctx("aws:CurrentTime", "9999-12-31T23:59:59Z"), true,
+	},
+	{
+		"year 9999 not before 2026", `{"DateLessThan":{"aws:CurrentTime":"2026-01-01T00:00:00Z"}}`,
+		ctx("aws:CurrentTime", "9999-12-31T23:59:59Z"), false,
+	},
+	{
+		"year 1 before year 9999", `{"DateLessThan":{"aws:CurrentTime":"9999-12-31"}}`,
+		ctx("aws:CurrentTime", "0001-01-01"), true,
+	},
+	{
+		"year 1 equals itself", `{"DateEquals":{"aws:CurrentTime":"0001-01-01T00:00:00Z"}}`,
+		ctx("aws:CurrentTime", "0001-01-01"), true,
+	},
+	{
+		"epoch after 2262",
+		`{"DateGreaterThan":{"aws:EpochTime":"9999-12-31T23:59:58Z"}}`,
+		ctx("aws:EpochTime", "253402300799"),
+		true,
+	},
+	{
+		"epoch 0 after year 1",
+		`{"DateGreaterThan":{"aws:EpochTime":"0001-01-01"}}`,
+		ctx("aws:EpochTime", "0"),
+		true,
+	},
+}
+
+func TestExtremeDates(t *testing.T) { runCondCases(t, extremeDateCases) }

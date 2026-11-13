@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"net/netip"
 	"strconv"
@@ -34,9 +35,9 @@ func compileValues(b baseOp, raw []string, vars bool, rc *requestContext) (match
 	case kindBool:
 		return boolMatcher(raw, vars, rc)
 	case kindNumeric:
-		return orderedMatcher(raw, parseNumber, b.order)
+		return orderedMatcher(raw, parseNumber, cmp.Compare[float64], b.order)
 	case kindDate:
-		return orderedMatcher(raw, parseDate, b.order)
+		return orderedMatcher(raw, parseDate, time.Time.Compare, b.order)
 	case kindBinary:
 		return binaryMatcher(raw)
 	case kindIP:
@@ -155,16 +156,14 @@ func parseBool(s string) (bool, bool) {
 	}
 }
 
-// ordered is a value that Numeric and Date operators compare.
-type ordered interface{ float64 | int64 }
-
 // orderedMatcher implements the Numeric and Date operators: the request's
 // value is compared with each policy value, as in NumericLessThan's "Less
 // than" matching or DateLessThan's "Matching before a specific date and
-// time".
-func orderedMatcher[T ordered](
+// time". compare orders two values as cmp.Compare does.
+func orderedMatcher[T any](
 	raw []string,
 	parse func(string) (T, bool),
+	compare func(a, b T) int,
 	o order,
 ) (matcher, bool) {
 	want := make([]T, 0, len(raw))
@@ -181,7 +180,7 @@ func orderedMatcher[T ordered](
 			return false, false
 		}
 		for _, w := range want {
-			if compare(got, w, o) {
+			if inOrder(compare(got, w), o) {
 				return true, true
 			}
 		}
@@ -189,18 +188,20 @@ func orderedMatcher[T ordered](
 	}, true
 }
 
-func compare[T ordered](got, want T, o order) bool {
+// inOrder reports whether c, the comparison of the request's value with
+// the policy's, satisfies o.
+func inOrder(c int, o order) bool {
 	switch o {
 	case orderLt:
-		return got < want
+		return c < 0
 	case orderLe:
-		return got <= want
+		return c <= 0
 	case orderGt:
-		return got > want
+		return c > 0
 	case orderGe:
-		return got >= want
+		return c >= 0
 	default:
-		return got == want
+		return c == 0
 	}
 }
 
@@ -255,26 +256,28 @@ var dateLayouts = []string{
 	"2006-01-02T15:04:05Z07:00",
 }
 
-// parseDate parses a date as Unix nanoseconds. A value of only digits is
-// epoch seconds.
-func parseDate(s string) (int64, bool) {
+// parseDate parses a date. A value of only digits is epoch seconds, valid
+// only within years 0000 to 9999, the years the ISO 8601 layouts can
+// write; beyond them time.Unix wraps. Dates compare as time.Time.
+func parseDate(s string) (time.Time, bool) {
 	if s != "" && digits(s) {
 		sec, err := strconv.ParseInt(s, 10, 64)
-		if err != nil || sec > maxEpoch {
-			return 0, false
+		if err != nil {
+			return time.Time{}, false
 		}
-		return sec * int64(time.Second), true
+		t := time.Unix(sec, 0)
+		if y := t.UTC().Year(); t.Unix() != sec || y < 0 || y > 9999 {
+			return time.Time{}, false
+		}
+		return t, true
 	}
 	for _, layout := range dateLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixNano(), true
+			return t, true
 		}
 	}
-	return 0, false
+	return time.Time{}, false
 }
-
-// maxEpoch is the largest epoch second whose nanoseconds fit in an int64.
-const maxEpoch = (1<<63 - 1) / int64(time.Second)
 
 // binaryMatcher implements BinaryEquals: "It compares the value of the
 // specified key byte for byte against a base-64 encoded representation of
