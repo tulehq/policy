@@ -42,7 +42,7 @@ func parsePrincipalElement(s *statement, r rawStatement) error {
 	if not && s.effect != effectDeny {
 		return parseErr(msgNotPrincipalEff)
 	}
-	p, err := parsePrincipals(v)
+	p, err := parsePrincipals(v, r.kind == kindResource)
 	if err != nil {
 		return err
 	}
@@ -50,7 +50,9 @@ func parsePrincipalElement(s *statement, r rawStatement) error {
 	return nil
 }
 
-func parsePrincipals(v any) (*principals, error) {
+// parsePrincipals parses the element's value; resource is whether it is in
+// a resource-based policy (see checkPrincipalIDs).
+func parsePrincipals(v any, resource bool) (*principals, error) {
 	if v == "*" {
 		return &principals{all: true}, nil
 	}
@@ -67,7 +69,7 @@ func parsePrincipals(v any) (*principals, error) {
 		if err != nil || len(list) == 0 {
 			return nil, parseErr(msgPrincipal)
 		}
-		all, ok := checkPrincipalIDs(m.name, list)
+		all, ok := checkPrincipalIDs(m.name, list, resource)
 		if !ok {
 			return nil, parseErr(msgPrincipal)
 		}
@@ -78,17 +80,58 @@ func parsePrincipals(v any) (*principals, error) {
 }
 
 // checkPrincipalIDs checks the values of one principal type and reports
-// whether they include the AWS "*".
-func checkPrincipalIDs(typ string, ids []string) (all, ok bool) {
+// whether they include the AWS "*". In a resource-based policy (resource)
+// an AWS value may also be a user or role unique ID, and Federated is not
+// accepted (see ParseResource).
+func checkPrincipalIDs(typ string, ids []string, resource bool) (all, ok bool) {
+	if resource && typ == "Federated" {
+		return false, false
+	}
 	for _, id := range ids {
 		switch {
 		case id == "*" && typ == "AWS":
 			all = true
-		case strings.ContainsAny(id, "*?") || !principalIDTypes[typ](id):
+		case !validPrincipalID(typ, id, resource):
 			return false, false
 		}
 	}
 	return all, true
+}
+
+// validPrincipalID reports whether id, not "*", is a valid value of the
+// principal type typ.
+func validPrincipalID(typ, id string, resource bool) bool {
+	if resource && typ == "AWS" && isUniqueID(id) {
+		return true
+	}
+	return !strings.ContainsAny(id, "*?") && principalIDTypes[typ](id)
+}
+
+// Unique ID prefixes: "AIDA" for an IAM user, "AROA" for a role ("IAM
+// identifiers", Understanding unique ID prefixes).
+const (
+	userIDPrefix = "AIDA"
+	roleIDPrefix = "AROA"
+)
+
+// isUniqueID reports whether id is an IAM user or role unique ID: its
+// prefix, then upper-case letters and digits, as in the page's
+// "AIDACKCEVSQ6C2EXAMPLE" and "AROADBQP57FF2AEXAMPLE", 16 to 128
+// characters in all. The User Guide gives no format beyond its examples;
+// the length is the IAM API's for UserId and RoleId (for example
+// https://docs.aws.amazon.com/IAM/latest/APIReference/API_User.html), and
+// the character set is this package's choice.
+func isUniqueID(id string) bool {
+	if len(id) < 16 || len(id) > 128 ||
+		!strings.HasPrefix(id, userIDPrefix) && !strings.HasPrefix(id, roleIDPrefix) {
+		return false
+	}
+	for _, c := range []byte(id) {
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // principalIDTypes checks that a value has the form of its principal type,

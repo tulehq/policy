@@ -101,11 +101,26 @@ type statement struct {
 // (https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements.html).
 // Element names are matched exactly. A rejected document returns a
 // *ParseError. Parse applies no size limit; that is the caller's.
-func Parse(doc []byte) (*Policy, error) { return parse(doc, false) }
+func Parse(doc []byte) (*Policy, error) { return parse(doc, kindAny) }
 
-// parse parses doc; trust lets a statement omit Resource even without a
-// Principal, so that ParseTrust can report the missing Principal instead.
-func parse(doc []byte, trust bool) (*Policy, error) {
+// docKind is the kind of policy a document is parsed as.
+type docKind uint8
+
+const (
+	// kindAny is Parse's lenient kind.
+	kindAny docKind = iota
+	// kindTrust is a role trust policy.
+	kindTrust
+	// kindResource is a resource-based policy.
+	kindResource
+)
+
+// parse parses doc as a policy of kind k. A trust or resource-based kind
+// lets a statement omit Resource even without a Principal, so that
+// ParseTrust and ParseResource can report the missing Principal instead,
+// and the resource-based kind takes the principal values of resource-based
+// policies (see checkPrincipalIDs).
+func parse(doc []byte, k docKind) (*Policy, error) {
 	v, err := decodeJSON(doc)
 	if err != nil {
 		return nil, parseErr(msgSyntax)
@@ -119,7 +134,7 @@ func parse(doc []byte, trust bool) (*Policy, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.statements, err = parseStatements(stmts, p.vars, trust); err != nil {
+	if p.statements, err = parseStatements(stmts, p.vars, k); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -155,7 +170,7 @@ func ParseIdentity(doc []byte) (*Policy, error) {
 // trust policy." (NotPrincipal page). A trust policy names no resource: it
 // is attached to the role it governs.
 func ParseTrust(doc []byte) (*Policy, error) {
-	p, err := parse(doc, true)
+	p, err := parse(doc, kindTrust)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +184,42 @@ func ParseTrust(doc []byte) (*Policy, error) {
 			return nil, parseErr(msgProhibited, "NotResource")
 		case s.hasResource:
 			return nil, parseErr(msgProhibited, "Resource")
+		}
+	}
+	return p, nil
+}
+
+// ParseResource parses a resource-based policy, such as a bucket, queue,
+// secret or function policy: Parse, and every statement needs a Principal
+// or NotPrincipal ("You must use the Principal element in resource-based
+// policies."; Principal page) and a Resource or NotResource ("Statements
+// must include either a Resource or a NotResource element."; "IAM JSON
+// policy elements: Resource"). A missing Principal is reported before a
+// missing Resource. NotPrincipal needs "Effect":"Deny", as in Parse.
+//
+// Principal values are those of resource-based policies: besides what
+// ParseTrust accepts, an AWS value may be the unique ID of an IAM user
+// (AIDA...) or role (AROA...) ("You can create resource-based policies
+// that grant access by unique ID"; "IAM identifiers",
+// https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_identifiers.html),
+// and Federated is refused: "OIDC federated principals are not supported
+// in policy types other than role trust policies." (Principal page). The
+// page describes SAML federated principals for role trust policies only;
+// refusing them here too is this package's choice.
+//
+// Services may layer their own checks, such as S3's requirement that
+// Resource name the bucket.
+func ParseResource(doc []byte) (*Policy, error) {
+	p, err := parse(doc, kindResource)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range p.statements {
+		switch {
+		case s.principal == nil:
+			return nil, parseErr(msgNoPrincipal)
+		case !s.hasResource:
+			return nil, parseErr(msgNoResources)
 		}
 	}
 	return p, nil
@@ -224,7 +275,7 @@ func parseVersion(v any) (bool, error) {
 // non-empty array of them. The grammar gives an array; the element
 // reference's examples and the IAM User Guide's own policies also use a
 // single object.
-func parseStatements(v any, vars, trust bool) ([]statement, error) {
+func parseStatements(v any, vars bool, k docKind) ([]statement, error) {
 	list, isList := v.([]any)
 	if !isList {
 		list = []any{v}
@@ -239,7 +290,7 @@ func parseStatements(v any, vars, trust bool) ([]statement, error) {
 		if !ok {
 			return nil, parseErr(msgSyntax)
 		}
-		s, err := parseStatement(obj, vars, trust)
+		s, err := parseStatement(obj, vars, k)
 		if err != nil {
 			return nil, err
 		}
@@ -259,8 +310,8 @@ type rawStatement struct {
 	fields map[string]any
 	// vars is whether the policy's Version replaces policy variables.
 	vars bool
-	// trust is whether the document is parsed as a trust policy.
-	trust bool
+	// kind is the kind of policy the document is parsed as.
+	kind docKind
 }
 
 func (r rawStatement) get(name string) (any, bool) {
@@ -289,8 +340,8 @@ var statementElements = map[string]bool{
 	"Condition": true,
 }
 
-func parseStatement(obj object, vars, trust bool) (statement, error) {
-	raw := rawStatement{fields: make(map[string]any, len(obj)), vars: vars, trust: trust}
+func parseStatement(obj object, vars bool, k docKind) (statement, error) {
+	raw := rawStatement{fields: make(map[string]any, len(obj)), vars: vars, kind: k}
 	for _, m := range obj {
 		if !statementElements[m.name] {
 			return statement{}, parseErr(msgSyntax)
@@ -428,7 +479,7 @@ func parseResourceElement(s *statement, r rawStatement) error {
 		return err
 	}
 	if !present {
-		if s.principal == nil && !r.trust {
+		if s.principal == nil && r.kind == kindAny {
 			return parseErr(msgNoResources)
 		}
 		return nil
