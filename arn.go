@@ -24,7 +24,8 @@ func parseARN(s string) (arn, bool) {
 func (a arn) isRoot() bool { return a.service == "iam" && a.resource == "root" }
 
 // assumedRole returns the role name of an assumed-role session ARN,
-// arn:partition:sts::account:assumed-role/role-name/role-session-name
+// arn:partition:sts::account:assumed-role/role-name/role-session-name. An
+// ARN without a role name or a session name is not one
 // ("AWS JSON policy elements: Principal", role session principals,
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_principal.html).
 func (a arn) assumedRole() (string, bool) {
@@ -35,8 +36,8 @@ func (a arn) assumedRole() (string, bool) {
 	if !ok {
 		return "", false
 	}
-	name, _, ok := strings.Cut(rest, "/")
-	return name, ok && name != ""
+	name, session, ok := strings.Cut(rest, "/")
+	return name, ok && name != "" && session != ""
 }
 
 // roleName returns the name of an IAM role ARN,

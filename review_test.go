@@ -249,3 +249,20 @@ func TestBinaryLineBreak(t *testing.T) {
 		t.Errorf("plain: %+v, want Allow", got)
 	}
 }
+
+// An assumed-role ARN without a session name is not a session of the role.
+func TestSessionNeedsName(t *testing.T) {
+	p := mustParse(t, `{"Version":"2012-10-17","Statement":{"Effect":"Allow",`+
+		`"Principal":{"AWS":"arn:aws:iam::111122223333:role/admin"},"Action":"sts:AssumeRole"}}`)
+	if AllowsPrincipal(p, "sts:AssumeRole", "arn:aws:sts::111122223333:assumed-role/admin/", nil) {
+		t.Error("an assumed-role ARN without a session name matched the role")
+	}
+	if !AllowsPrincipal(
+		p,
+		"sts:AssumeRole",
+		"arn:aws:sts::111122223333:assumed-role/admin/s",
+		nil,
+	) {
+		t.Error("a session of the role did not match")
+	}
+}
