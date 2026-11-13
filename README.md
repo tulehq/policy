@@ -11,6 +11,23 @@ It depends on the standard library only, and has no Tule types. Every rule
 below is taken from the IAM User Guide and cited, with the page, in a
 comment where it is implemented.
 
+## Changes in v0.2.0
+
+- New: `ParseResource`, `Caller`, `Authorize`, `Authorization` and
+  `Reason`, for resource-based policies evaluated with identity-based ones.
+  `Evaluate`, `TrustMatch` and the rest of the v0.1.0 API are unchanged in
+  signature.
+- **Tightened in `Parse` and `ParseTrust`:** an `AWS` principal ARN now
+  needs a blank region and a 12-digit account, as IAM ARNs have ("For IAM
+  resources, this is always kept blank."; `reference_identifiers.html`),
+  and a root ARN is recognized only in that form. A trust policy that
+  v0.1.0 accepted with, for example, `arn:aws:iam:us-east-1:ACCOUNT:root`
+  or a short account in a principal ARN is now refused with `Invalid
+  principal in policy`. identity must handle the trust policies it already
+  stores: one that no longer parses fails closed (its role cannot be
+  assumed) until it is rewritten, so identity should find and report such
+  policies when it upgrades, rather than meet them at AssumeRole.
+
 ## Installing
 
 ```sh
@@ -111,11 +128,15 @@ if az.Decision != policy.Allow {
   `arn:P:iam::A:role/PATH/NAME`, `arn:P:sts::A:assumed-role/ROLE/SESSION`,
   `arn:P:sts::A:federated-user/NAME` ("You can specify federated user
   sessions in the Principal element of a resource-based policy"). Names
-  follow the IAM and STS APIs' pattern `[\w+=,.@-]+`, and a path is
-  printable ASCII. Anything else is refused with `Invalid principal in
-  policy`: a group ("You cannot identify a user group as a principal"), a
-  policy or other IAM ARN, `:ROOT`, a trailing space, a session ARN
-  without a session, a user or role ARN without a name, a policy variable.
+  follow the IAM and STS APIs' pattern `[\w+=,.@-]+`, and a path IAM's
+  `pathType`, `(/)|(/[\u0021-\u007E]+/)` (`API_User.html`). Anything else
+  is refused with `Invalid principal in policy`: a group ("You cannot
+  identify a user group as a principal"), a policy or other IAM ARN,
+  `:ROOT`, a trailing space, a session ARN without a session, a user or
+  role ARN without a name, an empty path segment (`user//NAME`), a policy
+  variable (`${`), and in every kind of policy a `*` or `?` anywhere but a
+  whole `"*"` ("You cannot use a wildcard to match part of a principal name
+  or ARN.").
   `Federated` is refused. Services may layer their own checks, such as
   S3's requirement that `Resource` name the bucket.
 - `Caller{AccountID, ARN, PrincipalARN, UserID string; Type PrincipalType}`
@@ -331,8 +352,15 @@ Before reading any policy, `Authorize` refuses these requests with
   `PrincipalARN` equal to it and an `AIDA...` `UserID`; `AssumedRole` needs
   `arn:P:sts::AccountID:assumed-role/NAME/SESSION`, a `PrincipalARN` that
   is empty or a role ARN of the same partition and account whose name is
-  `NAME`, and a `UserID` of `AROA...:SESSION`. Any other `Type` is
-  refused. Matching and the root rule rely on these fields agreeing.
+  `NAME`, and a `UserID` of `AROA...:SESSION`. A user or role path must
+  match IAM's `pathType`, `(/)|(/[\u0021-\u007E]+/)`, as identity
+  enforces when it creates one, so `user//NAME` is refused and
+  `user/${x}/NAME` is accepted. Any other `Type`, an empty `Type` and an
+  empty `UserID` are refused: a sigv4 `StaticKey` under an ARN other than
+  the account root leaves `Type`, `UserID` and `PrincipalARN` empty, so its
+  caller is denied everything here. That key is `Root`, and services keep
+  root principals out of `Authorize` anyway. Matching and the root rule
+  rely on these fields agreeing.
 - A caller of another partition than the resource, when `Resource` is an
   ARN: "You cannot delegate access between accounts in different
   partitions." (`reference_identifiers.html`). A resource that is not an
