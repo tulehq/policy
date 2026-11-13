@@ -238,3 +238,14 @@ var exactNumberCases = []evalCase{
 }
 
 func TestExactNumbers(t *testing.T) { runEvalCases(t, exactNumberCases) }
+
+// Base64 with a line break is not a value: Go's decoder would skip it.
+func TestBinaryLineBreak(t *testing.T) {
+	allow := mustParse(t, condPolicy("Allow", `{"BinaryEquals":{"k:v":"QmluYXJ5"}}`))
+	if got := Evaluate(anyRequest(ctx("k:v", "Qmlu\nYXJ5")), allow); got.Decision != ImplicitDeny {
+		t.Errorf("line break: %+v, want ImplicitDeny", got)
+	}
+	if got := Evaluate(anyRequest(ctx("k:v", "QmluYXJ5")), allow); got.Decision != Allow {
+		t.Errorf("plain: %+v, want Allow", got)
+	}
+}

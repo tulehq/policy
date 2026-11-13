@@ -299,15 +299,15 @@ func parseDate(s string) (time.Time, bool) {
 func binaryMatcher(raw []string) (matcher, bool) {
 	want := make([][]byte, 0, len(raw))
 	for _, r := range raw {
-		b, err := base64.StdEncoding.DecodeString(r)
-		if err != nil {
+		b, ok := decodeBase64(r)
+		if !ok {
 			return nil, false
 		}
 		want = append(want, b)
 	}
 	return func(v string) (bool, bool) {
-		got, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
+		got, ok := decodeBase64(v)
+		if !ok {
 			return false, false
 		}
 		for _, w := range want {
@@ -317,6 +317,17 @@ func binaryMatcher(raw []string) (matcher, bool) {
 		}
 		return false, true
 	}, true
+}
+
+// decodeBase64 decodes standard, padded base64. Go's decoder skips
+// carriage returns and newlines; they make a value invalid here, so that
+// one byte string has one written form.
+func decodeBase64(s string) ([]byte, bool) {
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, false
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	return b, err == nil
 }
 
 // ipMatcher implements IpAddress: "The value must be in the standard CIDR
@@ -391,8 +402,8 @@ var valueCheckers = map[valueKind]func(string) bool{
 	kindDate:    func(v string) bool { _, ok := parseDate(v); return ok },
 	kindIP:      func(v string) bool { _, ok := parsePrefix(v); return ok },
 	kindBinary: func(v string) bool {
-		_, err := base64.StdEncoding.DecodeString(v)
-		return err == nil
+		_, ok := decodeBase64(v)
+		return ok
 	},
 	kindNull: func(v string) bool { _, ok := parseBool(v); return ok },
 	kindBool: func(v string) bool { _, ok := parseBool(v); return ok },
