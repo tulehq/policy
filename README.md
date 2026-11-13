@@ -39,7 +39,8 @@ if res.Decision != policy.Allow {
 	// AccessDenied. res.Policy and res.Sid name the deciding statement.
 }
 
-ok := policy.AllowsPrincipal(trust, "sts:AssumeRole", callerARN, ctx)
+tr := policy.TrustMatch(trust, roleAccountID, "sts:AssumeRole", callerARN, ctx)
+// tr.Decision, and tr.Direct for whether an identity Allow is also needed.
 ```
 
 ## API
@@ -70,10 +71,12 @@ ok := policy.AllowsPrincipal(trust, "sts:AssumeRole", callerARN, ctx)
   implicit deny; `Sid` is the deciding statement's Sid.
 - `Evaluate(req Request, policies ...*Policy) Result`. Nil policies are
   skipped.
-- `TrustMatch(trust *Policy, action, principalARN string, ctx
+- `TrustMatch(trust *Policy, roleAccount, action, principalARN string, ctx
   map[string][]string) TrustResult`, with `TrustResult{Decision Decision;
-  Direct bool; Sid string}`. `Direct` is true when an allowing statement
-  named the caller other than through its account.
+  Direct bool; Sid string}`. `roleAccount` is the account ID of the role the
+  trust policy is attached to. `Direct` is true when the caller is in that
+  account and an allowing statement named it other than through its
+  account.
 - `AllowsPrincipal(trust *Policy, action, principalARN string, ctx
   map[string][]string) bool` is `TrustMatch(...).Decision == Allow`.
 - `ParseError{Message string}`, returned by `Parse` as `*ParseError`.
@@ -199,14 +202,16 @@ name, so a role path does not matter). Other values match exactly. Only the
 `principalARN` argument identifies the caller; the context, including
 `aws:PrincipalArn`, plays no part in matching principals.
 
-`TrustMatch` also reports whether the Allow is direct: by `"*"`, or by the
-caller's own user, role or role-session ARN (or service, federated or
-canonical user identifier), rather than only by an account ID or root ARN.
-Its `Sid` is the first direct allowing statement's, else the first allowing
-statement's. AWS lets a direct grant in a resource-based policy stand
-without an identity Allow within the account, while an account grant
-delegates to the account's own policies ("How AWS enforcement code logic
-evaluates requests to allow or deny access",
+`TrustMatch` also reports whether the Allow is direct: the caller is a
+principal of the role's own account (`roleAccount`) and an allowing
+statement named it by its own user, role or role-session ARN, or by `"*"`,
+rather than only by an account ID or root ARN. A match in another account
+is never direct, nor is a caller without an account in its ARN, such as a
+service principal. Its `Sid` is the first direct allowing statement's, else
+the first allowing statement's. Within one account AWS lets a direct grant
+in a resource-based policy stand without an identity Allow, while an account
+grant delegates to the account's own policies ("How AWS enforcement code
+logic evaluates requests to allow or deny access",
 `reference_policies_evaluation-logic_policy-eval-denyallow.html`); applying
 that rule is the caller's.
 

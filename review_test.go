@@ -27,6 +27,7 @@ func TestTrustMatchSkipsResourceStatements(t *testing.T) {
 		`"Action":"sts:AssumeRole","Resource":"*"}}`
 	got := TrustMatch(
 		mustParse(t, doc),
+		"111122223333",
 		"sts:AssumeRole",
 		"arn:aws:iam::111122223333:user/alice",
 		nil,
@@ -140,6 +141,28 @@ func TestPrincipalTypes(t *testing.T) {
 	} {
 		if _, err := ParseTrust([]byte(trust(good))); err != nil {
 			t.Errorf("ParseTrust(%s) = %v", good, err)
+		}
+	}
+}
+
+// Direct needs the role's account: a match in another account is never
+// direct, and without a valid role account nothing is.
+func TestTrustMatchDirectNeedsRoleAccount(t *testing.T) {
+	p := mustParse(
+		t,
+		`{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":"*","Action":"sts:AssumeRole"}}`,
+	)
+	const caller = "arn:aws:iam::111122223333:user/alice"
+	for account, want := range map[string]bool{"111122223333": true, "999999999999": false, "": false} {
+		if got := TrustMatch(
+			p,
+			account,
+			"sts:AssumeRole",
+			caller,
+			nil,
+		); got.Decision != Allow ||
+			got.Direct != want {
+			t.Errorf("role account %q: %+v, want Allow with Direct %v", account, got, want)
 		}
 	}
 }

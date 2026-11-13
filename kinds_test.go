@@ -109,21 +109,39 @@ var trustMatchCases = []struct {
 		"arn:aws:sts::123456789012:assumed-role/r/s",
 		TrustResult{Decision: Allow, Direct: true, Sid: "T"},
 	},
+	// Direct only within the role's account (123456789012 here).
 	{
-		"star",
+		"star, same account",
 		`"*"`,
-		"arn:aws:iam::999999999999:user/x",
+		"arn:aws:iam::123456789012:user/x",
 		TrustResult{Decision: Allow, Direct: true, Sid: "T"},
 	},
 	{
-		"AWS star",
+		"user, other account",
+		`{"AWS":"arn:aws:iam::999999999999:user/eve"}`,
+		"arn:aws:iam::999999999999:user/eve",
+		TrustResult{Decision: Allow, Sid: "T"},
+	},
+	{
+		"session, other account", `{"AWS":"arn:aws:iam::999999999999:role/r"}`,
+		"arn:aws:sts::999999999999:assumed-role/r/s",
+		TrustResult{Decision: Allow, Sid: "T"},
+	},
+	{
+		"star, other account",
+		`"*"`,
+		"arn:aws:iam::999999999999:user/x",
+		TrustResult{Decision: Allow, Sid: "T"},
+	},
+	{
+		"AWS star, other account",
 		`{"AWS":"*"}`,
 		"arn:aws:iam::999999999999:user/x",
-		TrustResult{Decision: Allow, Direct: true, Sid: "T"},
+		TrustResult{Decision: Allow, Sid: "T"},
 	},
 	{
 		"service", `{"Service":"lambda.amazonaws.com"}`, "lambda.amazonaws.com",
-		TrustResult{Decision: Allow, Direct: true, Sid: "T"},
+		TrustResult{Decision: Allow, Sid: "T"},
 	},
 	{
 		"account and user, user is the caller",
@@ -150,7 +168,7 @@ func TestTrustMatch(t *testing.T) {
 		doc := `{"Version":"2012-10-17","Statement":{"Sid":"T","Effect":"Allow","Principal":` + c.principal +
 			`,"Action":"sts:AssumeRole"}}`
 		p := mustParse(t, doc)
-		if got := TrustMatch(p, "sts:AssumeRole", c.caller, nil); got != c.want {
+		if got := TrustMatch(p, "123456789012", "sts:AssumeRole", c.caller, nil); got != c.want {
 			t.Errorf("%s: TrustMatch = %+v, want %+v", c.name, got, c.want)
 		}
 		if got := AllowsPrincipal(
@@ -187,12 +205,13 @@ func TestTrustMatchStatements(t *testing.T) {
 		{"arn:aws:iam::555555555555:user/eve", TrustResult{Decision: ImplicitDeny}},
 	}
 	for _, c := range checks {
-		if got := TrustMatch(p, "sts:AssumeRole", c.caller, nil); got != c.want {
+		if got := TrustMatch(p, "123456789012", "sts:AssumeRole", c.caller, nil); got != c.want {
 			t.Errorf("%s: TrustMatch = %+v, want %+v", c.caller, got, c.want)
 		}
 	}
 	if got := TrustMatch(
 		nil,
+		"123456789012",
 		"sts:AssumeRole",
 		alice,
 		nil,
@@ -202,12 +221,19 @@ func TestTrustMatchStatements(t *testing.T) {
 	deny := mustParse(t, `{"Version":"2012-10-17","Statement":[
 	  {"Effect":"Allow","Principal":"*","Action":"sts:AssumeRole"},
 	  {"Sid":"OthersOut","Effect":"Deny","NotPrincipal":{"AWS":"`+alice+`"},"Action":"sts:AssumeRole"}]}`)
-	if got := TrustMatch(deny, "sts:AssumeRole", "arn:aws:iam::123456789012:user/bob", nil); got !=
+	if got := TrustMatch(
+		deny,
+		"123456789012",
+		"sts:AssumeRole",
+		"arn:aws:iam::123456789012:user/bob",
+		nil,
+	); got !=
 		(TrustResult{Decision: ExplicitDeny, Sid: "OthersOut"}) {
 		t.Errorf("NotPrincipal deny: %+v", got)
 	}
 	if got := TrustMatch(
 		deny,
+		"123456789012",
 		"sts:AssumeRole",
 		alice,
 		nil,
