@@ -87,22 +87,25 @@ func likeMatcher(raw []string, vars bool, rc *requestContext) matcher {
 }
 
 // arnMatcher implements ArnEquals and ArnLike, field by field (see
-// arnFields). A request value that is not an ARN of six fields is invalid.
+// arnFields). A request value that is not an ARN (see validARN) is
+// invalid.
 func arnMatcher(raw []string, vars bool, rc *requestContext) (matcher, bool) {
 	fields := make([][6]pattern, 0, len(raw))
 	for _, r := range raw {
-		p, ok := expand(nil, r, vars, rc)
-		if !ok {
-			continue
-		}
-		f, ok := arnFields(p)
-		if !ok {
+		if !validARNPattern(r, vars) {
 			return nil, false
+		}
+		f, resolved, valid := arnFields(r, vars, rc)
+		if !valid {
+			return nil, false
+		}
+		if !resolved {
+			continue
 		}
 		fields = append(fields, f)
 	}
 	return func(v string) (bool, bool) {
-		if strings.Count(v, ":") < 5 {
+		if !validARN(v) {
 			return false, false
 		}
 		for _, f := range fields {
@@ -357,11 +360,14 @@ func parsePrefix(s string) (netip.Prefix, bool) {
 // checkConditionValue reports whether a policy value can be valid for the
 // operator: a number for Numeric, a date for Date, an address or CIDR for
 // IpAddress, base64 for BinaryEquals, true or false for Bool and Null, and
-// an ARN of six fields for the ARN operators. A Bool or ARN value holding a
-// policy variable (with vars) is accepted, since its value is known only
-// per request. String values are always valid.
+// an ARN pattern for the ARN operators (see validARNPattern). A Bool value
+// holding a policy variable (with vars) is accepted, since its value is
+// known only per request. String values are always valid.
 func checkConditionValue(b baseOp, v string, vars bool) bool {
-	if (b.kind == kindBool || b.kind == kindARN) && vars && strings.Contains(v, "${") {
+	if b.kind == kindARN {
+		return validARNPattern(v, vars)
+	}
+	if b.kind == kindBool && vars && strings.Contains(v, "${") {
 		return true
 	}
 	check, ok := valueCheckers[b.kind]
@@ -380,5 +386,4 @@ var valueCheckers = map[valueKind]func(string) bool{
 	},
 	kindNull: func(v string) bool { _, ok := parseBool(v); return ok },
 	kindBool: func(v string) bool { _, ok := parseBool(v); return ok },
-	kindARN:  func(v string) bool { return strings.Count(v, ":") >= 5 },
 }

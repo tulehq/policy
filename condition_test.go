@@ -221,10 +221,6 @@ var operatorCases = []condCase{
 		false,
 	},
 	{"Bool variable", `{"Bool":{"k:b":"${k:v}"}}`, ctx("k:b", "true", "k:v", "TRUE"), true},
-	{
-		"ArnNotLike variable not an arn", `{"ArnNotLike":{"k:arn":"${k:v}"}}`,
-		ctx("k:arn", "arn:aws:s3:::b", "k:v", "b"), false,
-	},
 }
 
 var variableConditionCases = []condCase{

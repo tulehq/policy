@@ -158,6 +158,18 @@ var parseErrors = []struct{ doc, msg string }{
 	{cond(`{"Bool":{"k:b":"yes"}}`), "Condition value yes is not valid for Bool."},
 	{cond(`{"Null":{"k:b":"maybe"}}`), "Condition value maybe is not valid for Null."},
 	{
+		cond(`{"ArnEquals":{"k:a":"xyz:aws:sns:us-east-1:1:t"}}`),
+		"Condition value xyz:aws:sns:us-east-1:1:t is not valid for ArnEquals.",
+	},
+	{
+		cond(`{"ArnLike":{"k:a":"arn::sns:us-east-1:1:t"}}`),
+		"Condition value arn::sns:us-east-1:1:t is not valid for ArnLike.",
+	},
+	{
+		cond(`{"ArnLike":{"k:a":"arn:aws::us-east-1:1:t"}}`),
+		"Condition value arn:aws::us-east-1:1:t is not valid for ArnLike.",
+	},
+	{
 		cond(`{"ForAnyValue:ArnNotLike":{"k:a":"arn:aws:s3"}}`),
 		"Condition value arn:aws:s3 is not valid for ForAnyValue:ArnNotLike.",
 	},

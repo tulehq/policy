@@ -160,22 +160,27 @@ the root user, `aws:userid` are derived from `Request.Principal` when
   prefix or suffix combination) is a parse error, as is a policy value that
   cannot be valid for its operator: not a number for Numeric, not a date for
   Date, not an address or CIDR for IpAddress, not base64 for BinaryEquals,
-  not `true`/`false` for Bool or Null, not an ARN of six fields for the ARN
-  operators. A Bool or ARN value holding a policy variable is checked only
-  at evaluation. A Deny statement in a parsed policy therefore fails to
-  apply only because the request lacks a key or its values do not match,
-  never because the policy is malformed.
-- **Malformed request values never grant and always deny.** A request
-  value that is invalid for its operator (`"abc"` for a Numeric operator, a
-  non-ARN for an ARN operator, an epoch outside years 0000 to 9999 for a
-  Date operator) is neither a match nor a non-match: it takes the result
-  worse for the caller. In an Allow statement it never helps the condition
-  hold; in a Deny statement it always counts toward the condition holding.
-  This holds under every operator, plain, negated, `ForAnyValue` and
-  `ForAllValues`, while the key's valid values are compared as usual, so
-  appending a junk value can neither switch a Deny off nor switch an Allow
-  on. A policy value that a variable turns invalid follows the same rule.
-  AWS documents neither case; this is a deliberate choice.
+  not `true`/`false` for Bool or Null, and for the ARN operators not an ARN:
+  six colon-separated fields, the first `arn`, with a non-empty partition
+  and service. A Bool value holding a policy variable, and an ARN value
+  whose fields come from a variable (such as `${aws:PrincipalArn}`), are
+  checked only at evaluation. In an ARN value with six fields of its own, a
+  colon in a variable's value is literal text within its field. A Deny
+  statement in a parsed policy therefore fails to apply only because the
+  request lacks a key or its values do not match, never because the policy
+  is malformed.
+- **Malformed request values never grant and always deny.** A request value
+  that is invalid for its operator (`"abc"` for a Numeric operator, a value
+  that is not an ARN by the rule above for an ARN operator, an epoch outside
+  years 0000 to 9999 for a Date operator) is neither a match nor a
+  non-match: it takes the result worse for the caller. In an Allow statement
+  it never helps the condition hold; in a Deny statement it always counts
+  toward the condition holding. This holds under every operator, plain,
+  negated, `ForAnyValue` and `ForAllValues`, while the key's valid values
+  are compared as usual, so appending a junk value can neither switch a Deny
+  off nor switch an Allow on. A policy value that a variable turns invalid
+  follows the same rule. AWS documents neither case; this is a deliberate
+  choice.
 
 **Trust policies** (`reference_policies_elements_principal.html`,
 `..._notprincipal.html`). `AllowsPrincipal` applies the same deny-wins logic

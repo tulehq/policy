@@ -22,9 +22,12 @@ const (
 	condBinary          = `{"BinaryEquals":{"key":"QmluYXJ5VmFsdWVJbkJhc2U2NA=="}}`
 	condSourceIP        = `{"IpAddress":{"aws:SourceIp":"203.0.113.0/24"}}`
 	condSourceArn       = `{"ArnEquals":{"aws:SourceArn":"arn:aws:sns:us-west-2:123456789012:TOPIC-ID"}}`
-	condLogArns         = `{"ForAllValues:ArnLike":{"logs:LogGeneratingResourceArns":[` +
-		`"arn:aws::cloudfront:123456789012:distribution/*",` +
-		`"arn:aws::cloudfront:123456789012:distribution/support*"]}}`
+	// The page's table writes these ARNs as arn:aws::cloudfront:..., with an
+	// empty service field; its policy JSON writes arn:aws:cloudfront::...,
+	// the valid form used here.
+	condLogArns = `{"ForAllValues:ArnLike":{"logs:LogGeneratingResourceArns":[` +
+		`"arn:aws:cloudfront::123456789012:distribution/*",` +
+		`"arn:aws:cloudfront::123456789012:distribution/support*"]}}`
 	condInstanceType = `{"StringLikeIfExists":{"ec2:InstanceType":["t1.*","t2.*","m3.*"]}}`
 	condTagKeysAll   = `{"ForAllValues:StringEquals":{"aws:TagKeys":["environment","cost-center"]},` +
 		`"Null":{"aws:TagKeys":"false"}}`
@@ -124,7 +127,7 @@ var operatorPageCases = []condCase{
 		condLogArns,
 		ctx(
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:123456789012:distribution/costcenter",
+			"arn:aws:cloudfront::123456789012:distribution/costcenter",
 		),
 		true,
 	},
@@ -133,9 +136,9 @@ var operatorPageCases = []condCase{
 		condLogArns,
 		ctx(
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:123456789012:distribution/costcenter",
+			"arn:aws:cloudfront::123456789012:distribution/costcenter",
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:123456789012:distribution/support2025",
+			"arn:aws:cloudfront::123456789012:distribution/support2025",
 		),
 		true,
 	},
@@ -144,9 +147,9 @@ var operatorPageCases = []condCase{
 		condLogArns,
 		ctx(
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:123456789012:distribution/costcenter",
+			"arn:aws:cloudfront::123456789012:distribution/costcenter",
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:123456789012:distribution/admin",
+			"arn:aws:cloudfront::123456789012:distribution/admin",
 		),
 		true,
 	},
@@ -155,7 +158,7 @@ var operatorPageCases = []condCase{
 		condLogArns,
 		ctx(
 			"logs:LogGeneratingResourceArns",
-			"arn:aws::cloudfront:777788889999:distribution/costcenter",
+			"arn:aws:cloudfront::777788889999:distribution/costcenter",
 		),
 		false,
 	},

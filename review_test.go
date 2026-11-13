@@ -32,3 +32,76 @@ func TestTrustMatchSkipsResourceStatements(t *testing.T) {
 		t.Errorf("TrustMatch = %+v, want ImplicitDeny", got)
 	}
 }
+
+// ARN operators: a request value is an ARN only with the arn prefix, a
+// partition, a service and six fields; anything else is an invalid value,
+// which never grants and always denies. These are the review's probes.
+var arnShapeCases = []evalCase{
+	{
+		"Allow ArnNotLike five colons",
+		[]string{condPolicy("Allow",
+			`{"ArnNotLike":{"aws:SourceArn":"arn:aws:sns:*:*:blocked"}}`)},
+		anyRequest(ctx("aws:SourceArn", "junk:::::")), ImplicitDeny,
+	},
+	{
+		"Allow ArnNotEquals wrong prefix",
+		[]string{condPolicy("Allow",
+			`{"ArnNotEquals":{"aws:SourceArn":"arn:aws:sns:us-east-1:1:t"}}`)},
+		anyRequest(ctx("aws:SourceArn", "xyz:aws:sns:us-east-1:1:t")), ImplicitDeny,
+	},
+	{
+		"Allow ArnNotEquals empty service",
+		[]string{condPolicy("Allow",
+			`{"ArnNotEquals":{"aws:SourceArn":"arn:aws:sns:us-east-1:1:t"}}`)},
+		anyRequest(ctx("aws:SourceArn", "arn:aws::us-east-1:1:t")), ImplicitDeny,
+	},
+	{
+		"Deny ArnLike uppercase prefix",
+		[]string{allowAll, condPolicy("Deny",
+			`{"ArnLike":{"aws:SourceArn":"arn:aws:sns:*:*:*"}}`)},
+		anyRequest(ctx("aws:SourceArn", "ARN:aws:sns:us-east-1:1:t")), ExplicitDeny,
+	},
+	// A colon in a variable's value stays in its field.
+	{
+		"Allow ArnEquals variable cannot shift fields",
+		[]string{condPolicy("Allow",
+			`{"ArnEquals":{"aws:SourceArn":"arn:aws:sns:${aws:RequestTag/r}:111122223333:t"}}`)},
+		anyRequest(ctx("aws:SourceArn", "arn:aws:sns:us-east-1:999999999999:111122223333:t",
+			"aws:RequestTag/r", "us-east-1:999999999999")), ImplicitDeny,
+	},
+	{
+		"Deny ArnLike variable in field",
+		[]string{allowAll, condPolicy("Deny",
+			`{"ArnLike":{"aws:SourceArn":"arn:aws:sns:${aws:RequestTag/r}:111122223333:t"}}`)},
+		anyRequest(
+			ctx(
+				"aws:SourceArn",
+				"arn:aws:sns:us-east-1:111122223333:t",
+				"aws:RequestTag/r",
+				"us-east-1",
+			),
+		),
+		ExplicitDeny,
+	},
+	// A whole-value variable supplies the structure; its value stays
+	// literal, and a non-ARN value never grants.
+	{
+		"Allow ArnLike whole variable literal star",
+		[]string{condPolicy("Allow",
+			`{"ArnLike":{"k:arn":"${k:v}"}}`)},
+		anyRequest(ctx("k:arn", "arn:aws:s3:::bucket", "k:v", "arn:aws:s3:::*")), ImplicitDeny,
+	},
+	{
+		"Allow ArnLike whole variable",
+		[]string{condPolicy("Allow", `{"ArnLike":{"k:arn":"${k:v}"}}`)},
+		anyRequest(ctx("k:arn", "arn:aws:s3:::b", "k:v", "arn:aws:s3:::b")), Allow,
+	},
+	{
+		"Allow ArnNotLike whole variable not an arn",
+		[]string{condPolicy("Allow",
+			`{"ArnNotLike":{"k:arn":"${k:v}"}}`)},
+		anyRequest(ctx("k:arn", "arn:aws:s3:::b", "k:v", "b")), ImplicitDeny,
+	},
+}
+
+func TestARNShapes(t *testing.T) { runEvalCases(t, arnShapeCases) }

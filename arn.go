@@ -149,10 +149,39 @@ func splitResource(raw string, vars bool) (prefix, rest string, colons int) {
 // (*) or single-character match wildcards (?)." (IAM User Guide, "IAM JSON
 // policy elements: Condition operators",
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements_condition_operators.html).
-// ok is false when the value, after its variables are replaced, has fewer
-// than six fields.
-func arnFields(p pattern) ([6]pattern, bool) {
-	var f [6]pattern
+// When the policy text has six fields, they are split before its variables
+// are replaced, so a colon in a variable's value is literal text in its
+// field and cannot shift the fields after it. When the text leaves the
+// ARN's structure to variables (as "${aws:PrincipalArn}" does), the fields
+// are split after replacement, and the result must then be a valid ARN
+// pattern or the value is invalid (valid false). resolved is false when a
+// variable has no value.
+func arnFields(raw string, vars bool, rc *requestContext) (f [6]pattern, resolved, valid bool) {
+	parts := splitFields(raw, vars)
+	if len(parts) < 6 {
+		return splitExpanded(raw, vars, rc)
+	}
+	for i, part := range parts {
+		p, ok := expand(nil, part, vars, rc)
+		if !ok {
+			return f, false, true
+		}
+		f[i] = p
+	}
+	return f, true, true
+}
+
+// splitExpanded compiles raw with its variables replaced, as literal text,
+// and splits the result into fields at its colons.
+func splitExpanded(raw string, vars bool, rc *requestContext) (f [6]pattern, resolved, valid bool) {
+	s, ok := expandString(raw, vars, rc)
+	if !ok {
+		return f, false, true
+	}
+	if !validARN(s) {
+		return f, true, false
+	}
+	p, _ := expand(nil, raw, vars, rc)
 	n := 0
 	for _, t := range p {
 		if n < 5 && t.kind == tokLit && t.r == ':' {
@@ -161,7 +190,47 @@ func arnFields(p pattern) ([6]pattern, bool) {
 		}
 		f[n] = f[n].add(t)
 	}
-	return f, n == 5
+	return f, true, true
+}
+
+// splitFields splits raw into at most six fields at its colons, not
+// counting colons inside a ${...} variable when vars is set.
+func splitFields(raw string, vars bool) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(raw) && len(parts) < 5; i++ {
+		if vars && strings.HasPrefix(raw[i:], "${") {
+			if end := strings.IndexByte(raw[i:], '}'); end > 0 {
+				i += end
+				continue
+			}
+		}
+		if raw[i] == ':' {
+			parts = append(parts, raw[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, raw[start:])
+}
+
+// validARNPattern reports whether an ARN condition's policy value has the
+// shape of an ARN: six fields, the first "arn", and a non-empty partition
+// and service ("arn:partition:service:region:account-id:resource-id";
+// "Identify AWS resources with Amazon Resource Names (ARNs)"). A value with
+// fewer fields that holds a variable is accepted: its shape is known only
+// per request (see arnFields).
+func validARNPattern(raw string, vars bool) bool {
+	f := splitFields(raw, vars)
+	if len(f) < 6 {
+		return vars && strings.Contains(raw, "${")
+	}
+	return f[0] == "arn" && f[1] != "" && f[2] != ""
+}
+
+// validARN reports whether a request value is an ARN by the same rule.
+func validARN(v string) bool {
+	f := strings.SplitN(v, ":", 6)
+	return len(f) == 6 && f[0] == "arn" && f[1] != "" && f[2] != ""
 }
 
 // matchARNFields reports whether the six field patterns match the ARN v
