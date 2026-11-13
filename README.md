@@ -104,9 +104,20 @@ if az.Decision != policy.Allow {
   policy (bucket, queue, secret, function, email identity policy): each
   statement needs `Principal` or `NotPrincipal` (reported first when
   missing, `Missing required field Principal.`) and `Resource` or
-  `NotResource`. An `AWS` principal may also be a user (`AIDA...`) or role
-  (`AROA...`) unique ID; `Federated` is refused. Services may layer their
-  own checks, such as S3's requirement that `Resource` name the bucket.
+  `NotResource`. An `AWS` principal is `"*"`, a 12-digit account ID, a
+  user (`AIDA...`) or role (`AROA...`) unique ID, or one of these ARNs,
+  each with a partition, a blank region and a 12-digit account:
+  `arn:P:iam::A:root`, `arn:P:iam::A:user/PATH/NAME`,
+  `arn:P:iam::A:role/PATH/NAME`, `arn:P:sts::A:assumed-role/ROLE/SESSION`,
+  `arn:P:sts::A:federated-user/NAME` ("You can specify federated user
+  sessions in the Principal element of a resource-based policy"). Names
+  follow the IAM and STS APIs' pattern `[\w+=,.@-]+`, and a path is
+  printable ASCII. Anything else is refused with `Invalid principal in
+  policy`: a group ("You cannot identify a user group as a principal"), a
+  policy or other IAM ARN, `:ROOT`, a trailing space, a session ARN
+  without a session, a user or role ARN without a name, a policy variable.
+  `Federated` is refused. Services may layer their own checks, such as
+  S3's requirement that `Resource` name the bucket.
 - `Caller{AccountID, ARN, PrincipalARN, UserID string; Type PrincipalType}`
   describes the principal making a request, with the meanings of
   tule.dev/sigv4 v0.4.1's `Principal` fields of the same names.
@@ -246,7 +257,9 @@ statements whose action matches, whose `Principal` names the caller (or
 whose `NotPrincipal` does not), and whose conditions hold; a statement with
 no `Principal` or with a `Resource` never applies. Each principal type takes
 only its own kind of value, and anything else is refused at parse: `AWS` an
-account ID, an IAM or STS ARN, or `"*"`; `Service` a service principal such
+account ID, an IAM or STS ARN with a blank region and a 12-digit account
+("For IAM resources, this is always kept blank."; `reference_identifiers.html`),
+or `"*"`; `Service` a service principal such
 as `ecs.amazonaws.com`; `Federated` a SAML or OIDC provider ARN or a
 built-in provider such as `accounts.google.com`; `CanonicalUser` a 64-digit
 hexadecimal ID. Partial wildcards are refused. `"*"` and `{"AWS":"*"}` match
@@ -308,6 +321,23 @@ decides in this order:
    permissions in their account". A `ResourceAccount` that is not a 12-digit
    ID is never the caller's account, so both allows are needed.
 
+Before reading any policy, `Authorize` refuses two kinds of caller with
+`ImplicitDeny` and `NoIdentityAllow`, both this package's choice:
+
+- A `Caller` whose fields disagree. `AccountID` must be 12 digits and the
+  account of `ARN`, an IAM or STS ARN with a blank region. By `Type`:
+  `Account` needs `ARN` exactly `arn:P:iam::AccountID:root`, `PrincipalARN`
+  equal to it and `UserID` the account ID; `User` needs an IAM user ARN,
+  `PrincipalARN` equal to it and an `AIDA...` `UserID`; `AssumedRole` needs
+  `arn:P:sts::AccountID:assumed-role/NAME/SESSION`, a `PrincipalARN` that
+  is empty or a role ARN of the same partition and account whose name is
+  `NAME`, and a `UserID` of `AROA...:SESSION`. Any other `Type` is
+  refused. Matching and the root rule rely on these fields agreeing.
+- A session whose role was deleted (`AssumedRole` with an empty
+  `PrincipalARN`). Without `aws:PrincipalArn` a Deny keyed on the role's
+  ARN would not apply to it, and identity refuses it everything but
+  GetCallerIdentity.
+
 The root user (`PrincipalTypeAccount`) has an identity-based Allow without
 policies ("with the exception of the AWS account root user, which has full
 access"), so another account's root needs only the resource-based grant.
@@ -325,7 +355,10 @@ never applies, and the identity side never applies a statement with a
 
 - `"*"` and `{"AWS":"*"}`: every caller, directly.
 - An account ID or `arn:PARTITION:iam::ACCOUNT:root`: every caller of that
-  account (of that partition, for the ARN), through the account.
+  account and partition, through the account. An account ID names the
+  account in the resource's partition, so it matches nothing when the
+  resource is not an ARN ("You cannot delegate access between accounts in
+  different partitions."; `reference_identifiers.html`).
 - `arn:...:iam::ACCOUNT:user/PATH/NAME`: the IAM user with that `ARN`.
 - `arn:...:iam::ACCOUNT:role/PATH/NAME`: a role session whose
   `PrincipalARN` is that ARN, path included (a role ARN is
@@ -339,37 +372,42 @@ never applies, and the identity side never applies a statement with a
   letters and digits, 16 to 128 characters (the IAM API's `UserId` and
   `RoleId` lengths), is this package's choice.
 - Service, CanonicalUser and federated-user values match no caller.
-- **A session whose role was deleted** (`Type` AssumedRole, empty
-  `PrincipalARN`) matches nothing that names the role: not the role ARN,
-  not its session ARN, not the role ID. It still matches `"*"` and its
-  account, and `aws:PrincipalArn` is absent for it, so a condition on the
-  role ARN does not hold for it, and an `ArnNotEquals` Deny on it applies.
-  This is the rule tule.dev/sigv4 v0.4.1 states for `Principal.PrincipalARN`.
-  AWS reaches the same end through unique IDs: "if you delete the role,
-  then you break the relationship. The policy no longer applies".
-- A `Caller` whose `Type` is none of the three matches only `"*"` and its
-  account.
+- **A session whose role was deleted** is refused before matching (see
+  above). Matching keeps the rule tule.dev/sigv4 v0.4.1 states for
+  `Principal.PrincipalARN` as a second guard: nothing that names the role
+  (role ARN, session ARN, role ID) matches such a session. AWS reaches the
+  same end through unique IDs: "if you delete the role, then you break the
+  relationship. The policy no longer applies".
 
 `NotPrincipal` (`reference_policies_elements_notprincipal.html`): "When you
 use NotPrincipal, you must also specify the account ARN of the not-denied
 principal. Otherwise, the policy might deny access to the entire account
 ... AWS might validate the account first, then the role, and then the
-assumed-role user." AWS leaves the exact rule to each service. This
-package's choice is the strict reading: the caller is exempt from the Deny
-only when the element names its account and, unless it is the root user,
-the caller itself as `Principal` would (its user ARN or ID, its role's ARN
-or ID, or its session ARN), or when the element is `"*"`. So `NotPrincipal`
-with a user ARN alone, or a role ARN alone, denies that user or session,
-and a session whose role was deleted is never exempt but by `"*"`.
+assumed-role user. ... we strongly recommend that you explicitly include
+the ARN for a user's account, or include both the ARN for a role and the
+ARN for the account containing that role." AWS leaves the exact rule to
+each service. This package's choice is the strict reading of that
+recommendation. The caller is exempt from the Deny when the element is
+`"*"`, or when it names the caller's account (by account ID or root ARN)
+and also:
+
+- for the root user, nothing more;
+- for an IAM user, that user, by its ARN or `AIDA...` ID;
+- for a role session, the role, by its ARN or `AROA...` ID. The session's
+  own ARN does not count: it names the session, not the role.
+
+So `NotPrincipal` with a user ARN alone, a role ARN alone, or the account
+and a session ARN, denies that user or session.
 
 **Request context in `Authorize`.** `aws:PrincipalArn`,
-`aws:PrincipalAccount`, `aws:userid` and `aws:PrincipalType` come from the
-`Caller` (`PrincipalARN`, `AccountID`, `UserID`, `Type`) and replace any
-value `Context` gives them; an empty field makes its key absent, and none
-is derived from `Caller.ARN`. That is this package's choice, so that a
-service cannot derive a deleted role's ARN for its session by mistake.
-`aws:username` is still derived from a user's ARN when `Context` lacks it;
-`aws:PrincipalTag/*` and every other key come from `Context` only.
+`aws:PrincipalAccount`, `aws:userid`, `aws:PrincipalType` and
+`aws:username` come from the `Caller` (`PrincipalARN`, `AccountID`,
+`UserID`, `Type`, and for an IAM user the last element of `ARN`) and
+replace any value `Context` gives them. `aws:username` is absent for other
+callers ("present for IAM users only"; `reference_policies_variables.html`).
+That is this package's choice, so that a caller's identity keys cannot be
+set through the request context. `aws:PrincipalTag/*` and every other key
+come from `Context` only.
 
 **Matching cost.** Wildcard patterns are matched by simulating the pattern
 as an automaton, in O(pattern × input) time and O(pattern) space whatever
@@ -377,9 +415,17 @@ the number of wildcards; no input backtracks exponentially. A condition
 compares every request value with every policy value, so `Evaluate`'s cost
 grows with the context's size times the policies' (2000 request values of
 200 characters against 2000 `StringLike` patterns took about 11 seconds in
-testing). Services must cap the
-request context they pass, in number of keys and values and in value
-length, as they cap policy size.
+testing). Policy size matters the same way: a review measured 22 seconds
+for one evaluation of 50 statements in an 800KB resource-based policy.
+Profiling the same shape here (50 statements of about 16KB of `a*`
+wildcards, 804KB in all) put over 90% of the time in matching, which
+grows with the resource's length (75 ms for a 100-character resource, 790
+ms for a 1024-character one), and almost none in compiling patterns, so
+patterns are not precompiled at parse. Services must cap the request
+context they pass, in number of keys and values and in value length, and
+cap policy size, as AWS caps each resource-based policy ("Bucket policies
+are limited to 20 KB in size."; S3 User Guide,
+`https://docs.aws.amazon.com/AmazonS3/latest/userguide/add-bucket-policy.html`).
 
 ## Parse error messages
 
@@ -416,8 +462,8 @@ text for those faults is not documented.
   principal's unique ID, so a principal recreated under the same name does
   not inherit the grant. `Authorize` matches by ARN, so a recreated user or
   role does inherit it, until identity can resolve unique IDs for the
-  services. A session whose role was deleted is the exception: it matches
-  nothing that names the role (see Resource-based principals).
+  services. A session whose role was deleted is the exception: `Authorize`
+  refuses it.
 - `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` are not supplied
   (identity does not carry the organization), so a condition on them never
   holds, and a negated one always does.
