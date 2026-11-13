@@ -1,0 +1,26 @@
+{
+    "Version":"2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowS3ListRead",
+            "Effect": "Allow",
+            "Action": "s3:ListAllMyBuckets",
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowS3ProductionObjectActions",
+            "Effect": "Allow",
+            "Action": "s3:*Object*",
+            "Resource": "arn:aws:s3:::amzn-s3-demo-bucket-production/*"
+        },
+        {
+            "Sid": "DenyS3Logs",
+            "Effect": "Deny",
+            "Action": "s3:*",
+            "Resource": [
+                "arn:aws:s3:::*log*",
+                "arn:aws:s3:::*log*/*"
+            ]
+        }
+    ]
+}

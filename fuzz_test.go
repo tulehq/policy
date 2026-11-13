@@ -143,3 +143,141 @@ func isJunk(operator, v string) bool {
 	op, ok := parseOperator(operator)
 	return ok && !checkConditionValue(op.base, v, false)
 }
+
+func FuzzParseResource(f *testing.F) {
+	for _, c := range parseResourceCases {
+		f.Add([]byte(c.doc))
+	}
+	for _, doc := range parseOK {
+		f.Add([]byte(doc))
+	}
+	f.Add([]byte(trustPolicy))
+	f.Fuzz(func(t *testing.T, doc []byte) {
+		p, err := ParseResource(doc)
+		if err != nil {
+			var pe *ParseError
+			if !errors.As(err, &pe) || pe.Message == "" || p != nil {
+				t.Fatalf("ParseResource error %v is not a *ParseError with a message alone", err)
+			}
+			return
+		}
+		checkResourceStatements(t, p)
+		// A parsed policy must authorize consistently, for every kind of
+		// caller, within its account and from another.
+		for _, c := range []Caller{devUser, session, orphan, root, {}} {
+			for _, account := range []string{acct, other} {
+				checkAuthorization(t, Authorize(AuthorizeRequest{
+					Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k", ResourceAccount: account,
+					Caller: c, Context: ctx("aws:SourceIp", "203.0.113.1"),
+				}, p), account == c.AccountID)
+			}
+		}
+	})
+}
+
+// checkResourceStatements checks that every statement of a policy
+// ParseResource accepted has what a resource-based statement needs.
+func checkResourceStatements(t *testing.T, p *Policy) {
+	t.Helper()
+	for i, s := range p.statements {
+		if s.principal == nil || !s.hasResource || s.notPrincipal && s.effect != effectDeny {
+			t.Fatalf("statement %d is not a resource-based statement: %+v", i, s)
+		}
+	}
+}
+
+// fuzzResourceDocs are resource-based policies whose statements name the
+// fuzzed callers in every way a Principal can. Only the first grants
+// through "*".
+var fuzzResourceDocs = []string{
+	resourceDoc("Allow", `"Principal":"*"`, bucketObjects),
+	resourceDoc(
+		"Allow",
+		`"Principal":{"AWS":["`+acct+`","arn:aws:iam::`+other+`:root"]}`,
+		bucketObjects,
+	),
+	resourceDoc("Allow", `"Principal":{"AWS":["`+session.PrincipalARN+`","`+session.ARN+
+		`","AROAREADEREXAMPLE0001","`+devUser.ARN+`","AIDADEVEXAMPLE0000001"]}`, bucketObjects),
+	resourceDoc("Deny", `"NotPrincipal":{"AWS":["`+devUser.ARN+`","`+acct+`"]}`,
+		`,"Resource":"arn:aws:s3:::b/private/*"`),
+	resourceDoc("Deny", `"Principal":"*"`, bucketObjects+
+		`,"Condition":{"ArnNotEquals":{"aws:PrincipalArn":"`+session.PrincipalARN+`"}}`),
+}
+
+const denyAll = `{"Version":"2012-10-17","Statement":{"Effect":"Deny","Action":"*","Resource":"*"}}`
+
+// FuzzAuthorize authorizes arbitrary callers and requests against
+// resource-based policies and checks the decision's invariants.
+func FuzzAuthorize(f *testing.F) {
+	for _, c := range []Caller{devUser, session, orphan, root} {
+		f.Add(c.AccountID, c.ARN, c.PrincipalARN, c.UserID, string(c.Type), acct,
+			"s3:GetObject", "arn:aws:s3:::b/k", uint8(2), false)
+	}
+	f.Add(other, "arn:aws:iam::"+other+":user/x", "", "", "User", acct, "s3:PutObject",
+		"arn:aws:s3:::b/private/k", uint8(3), true)
+	f.Fuzz(
+		func(t *testing.T, account, arn, principalARN, userID, typ, resAccount, action, resource string,
+			doc uint8, idAllow bool,
+		) {
+			c := Caller{
+				AccountID:    account,
+				ARN:          arn,
+				PrincipalARN: principalARN,
+				UserID:       userID,
+				Type:         PrincipalType(typ),
+			}
+			n := int(doc) % len(fuzzResourceDocs)
+			rp := mustParseResource(t, fuzzResourceDocs[n])
+			var ids []*Policy
+			if idAllow {
+				ids = append(ids, mustParse(t, allowAll))
+			}
+			req := AuthorizeRequest{
+				Action:          action,
+				Resource:        resource,
+				ResourceAccount: resAccount,
+				Caller:          c,
+			}
+			got := Authorize(req, rp, ids...)
+			checkAuthorization(t, got, isAccountID(account) && account == resAccount)
+			if c.orphaned() && got.Direct && n != 0 {
+				t.Fatalf("an orphaned session was granted directly other than by \"*\": %+v", got)
+			}
+			if d := Authorize(
+				req,
+				rp,
+				append(ids, mustParse(t, denyAll))...); d.Reason != IdentityDeny {
+				t.Fatalf("an identity Deny on everything did not deny: %+v", d)
+			}
+		},
+	)
+}
+
+// checkAuthorization checks the invariants of one Authorize result: the
+// reason agrees with the decision and the per-kind results, and an Allow
+// has the allows it needs within one account (same) or across accounts.
+func checkAuthorization(t *testing.T, a Authorization, same bool) {
+	t.Helper()
+	if (a.Decision == Allow) != (a.Reason == NoReason) || a.Direct && a.Resource.Decision != Allow {
+		t.Fatalf("reason or Direct disagrees with the decision: %+v", a)
+	}
+	if a.Decision == ExplicitDeny && !explicitDenyFrom(a) {
+		t.Fatalf("an explicit deny without its policy's Deny: %+v", a)
+	}
+	if a.Decision == Allow && !allowedBy(a, same) {
+		t.Fatalf("Allow without the allows it needs (same account %v): %+v", same, a)
+	}
+}
+
+func explicitDenyFrom(a Authorization) bool {
+	return a.Reason == IdentityDeny && a.Identity.Decision == ExplicitDeny ||
+		a.Reason == ResourceDeny && a.Resource.Decision == ExplicitDeny
+}
+
+func allowedBy(a Authorization, same bool) bool {
+	id, res := a.Identity.Decision == Allow, a.Resource.Decision == Allow
+	if same {
+		return id || res && a.Direct
+	}
+	return id && res
+}

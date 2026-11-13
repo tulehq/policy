@@ -1,0 +1,20 @@
+{
+  "Version":"2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyCrossAuditAccess",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::Bucket_Account_Audit",
+        "arn:aws:s3:::Bucket_Account_Audit/*"
+      ],
+      "Condition": {
+        "ArnNotEquals": {
+          "aws:PrincipalArn": "arn:aws:iam::444455556666:role/read-only-role"
+        }
+      }
+    }
+  ]
+}
