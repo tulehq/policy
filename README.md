@@ -11,6 +11,18 @@ It depends on the standard library only, and has no Tule types. Every rule
 below is taken from the IAM User Guide and cited, with the page, in a
 comment where it is implemented.
 
+## Changes in v0.3.0
+
+- New: unknown context keys. `Request` and `AuthorizeRequest` take
+  `Unknown []string`, and `EvaluateTrust` with `TrustRequest` is
+  `TrustMatch` with `Unknown`. A condition on an unknown key, or a policy
+  variable naming one, resolves against the caller: it never helps an
+  Allow apply and always helps a Deny apply. A name ending in `/` marks a
+  family of keys, such as `aws:PrincipalTag/`. See "Unknown context keys"
+  below.
+- Additive only: with `Unknown` empty every decision is as in v0.2.1, and
+  no existing signature changes.
+
 ## Changes in v0.2.0
 
 - New: `ParseResource`, `Caller`, `Authorize`, `Authorization` and
@@ -302,24 +314,39 @@ as malformed request values.
   default may not apply. Only variables that are replaced count: under the
   String, Bool and ARN operators, in a 2012-10-17 policy.
 - A `Resource` or `NotResource` entry with such a variable in its resource
-  portion (after the fifth colon, where variables are replaced) decides the
-  whole element: the statement's resource never matches in an Allow and
-  always matches in a Deny, whatever the other entries say. A variable
-  elsewhere in the ARN is literal text, as without unknown keys.
-- Names match case-insensitively, as context keys do. An unknown key is
-  unknown whatever `Context` gives it, whatever the principal ARN implies,
-  and in `Authorize` whatever the `Caller` gives it.
+  portion (after the fifth colon, where variables are replaced) is decided
+  on its own, against the caller. It counts as `*` for `Resource` in a
+  Deny (the Deny applies) and `NotResource` in an Allow (the Allow does
+  not), and is dropped for `Resource` in an Allow (it grants nothing) and
+  `NotResource` in a Deny (it exempts nothing). The other entries match as
+  usual.
+  A variable elsewhere in the ARN is literal text, as without unknown keys.
+- Names match case-insensitively, as context keys do. A name ending in
+  `/` marks a family: `aws:PrincipalTag/` makes every key it prefixes
+  unknown, such as `aws:PrincipalTag/team`. Every other name is one exact
+  key, spaces included, and names are not patterns: `aws:PrincipalTag/*`
+  and `aws:PrincipalTag` name keys no policy tests, and mark nothing else
+  unknown. An unknown key is unknown whatever `Context` gives it, whatever
+  the principal ARN implies, and in `Authorize` whatever the `Caller`
+  gives it.
+- `Principal` and `NotPrincipal` match the `Caller` fields (or, for
+  `TrustMatch` and `EvaluateTrust`, the principal ARN), not context keys,
+  so `Unknown` does not affect them.
 - With `Unknown` empty, or naming only keys the policies do not use,
   every decision is unchanged.
 
-A whole condition or element resolves against the caller, even when a
-known part of it would decide the same way for any value of the unknown
-key. So the result is never better for the caller than the worst it could
-be had the key been known, and can be worse:
+A whole condition resolves against the caller, even when a known part of
+it would decide the same way for any value of the unknown key. So the
+result is never better for the caller than the worst it could be for any
+values of the unknown keys, and can be worse; a property test checks that
+bound, `Direct` included, over random policies:
 
 ```go
-// Allow, Resource ["arn:aws:s3:::b/${aws:PrincipalOrgID}/*", "arn:aws:s3:::b/*"]:
-// the request on arn:aws:s3:::b/k is not allowed by this statement.
+// Allow, Resource ["arn:aws:s3:::b/${aws:PrincipalOrgID}/*", "arn:aws:s3:::c/*"]:
+// the request on arn:aws:s3:::b/k is not allowed by this statement (with
+// "arn:aws:s3:::b/*" as the second entry, it would be).
+// Deny, Resource "arn:aws:s3:::b/${aws:PrincipalOrgID}/*": applies to any
+// resource, as "*" would.
 // Deny, Condition {"StringNotEqualsIfExists": {"aws:PrincipalOrgID": "o-1"}}:
 // the Deny applies, whatever Context says aws:PrincipalOrgID is.
 res := policy.Evaluate(policy.Request{
@@ -327,7 +354,7 @@ res := policy.Evaluate(policy.Request{
 	Resource:  "arn:aws:s3:::b/k",
 	Principal: callerARN,
 	Context:   ctx,
-	Unknown:   []string{"aws:PrincipalOrgID"},
+	Unknown:   []string{"aws:PrincipalOrgID", "aws:PrincipalTag/"},
 }, p)
 tr := policy.EvaluateTrust(trust, policy.TrustRequest{
 	RoleAccount: roleAccountID, Action: "sts:AssumeRole", Principal: callerARN,
