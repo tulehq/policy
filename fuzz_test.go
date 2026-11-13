@@ -240,7 +240,7 @@ func FuzzAuthorize(f *testing.F) {
 				Caller:          c,
 			}
 			got := Authorize(req, rp, ids...)
-			if !c.valid() || c.orphaned() {
+			if !c.valid() || c.orphaned() || crossPartition(resource, c) {
 				checkRefused(t, got)
 				return
 			}
@@ -255,8 +255,9 @@ func FuzzAuthorize(f *testing.F) {
 	)
 }
 
-// checkRefused checks that a caller Authorize must refuse before reading
-// any policy (an invalid or orphaned one) was refused so.
+// checkRefused checks that a request Authorize must refuse before reading
+// any policy (an invalid or orphaned caller, or one of another partition
+// than the resource) was refused so.
 func checkRefused(t *testing.T, a Authorization) {
 	t.Helper()
 	none := Result{Decision: ImplicitDeny, Policy: -1}

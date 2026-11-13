@@ -321,8 +321,8 @@ decides in this order:
    permissions in their account". A `ResourceAccount` that is not a 12-digit
    ID is never the caller's account, so both allows are needed.
 
-Before reading any policy, `Authorize` refuses two kinds of caller with
-`ImplicitDeny` and `NoIdentityAllow`, both this package's choice:
+Before reading any policy, `Authorize` refuses these requests with
+`ImplicitDeny` and `NoIdentityAllow`, each this package's choice:
 
 - A `Caller` whose fields disagree. `AccountID` must be 12 digits and the
   account of `ARN`, an IAM or STS ARN with a blank region. By `Type`:
@@ -333,6 +333,11 @@ Before reading any policy, `Authorize` refuses two kinds of caller with
   is empty or a role ARN of the same partition and account whose name is
   `NAME`, and a `UserID` of `AROA...:SESSION`. Any other `Type` is
   refused. Matching and the root rule rely on these fields agreeing.
+- A caller of another partition than the resource, when `Resource` is an
+  ARN: "You cannot delegate access between accounts in different
+  partitions." (`reference_identifiers.html`). A resource that is not an
+  ARN, such as `"*"`, has no partition and refuses no caller; principal
+  matching uses only the caller's partition.
 - A session whose role was deleted (`AssumedRole` with an empty
   `PrincipalARN`). Without `aws:PrincipalArn` a Deny keyed on the role's
   ARN would not apply to it, and identity refuses it everything but
