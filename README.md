@@ -12,7 +12,7 @@ It depends on the standard library only, and has no Tule types. Every rule
 below is taken from the IAM User Guide and cited, with the page, in a
 comment where it is implemented.
 
-## Unreleased
+## Changes in v0.4.0
 
 - New: `ServiceRequest` and `AuthorizeService`, for requests made by an AWS
   service principal, such as `secretsmanager.amazonaws.com` invoking a
