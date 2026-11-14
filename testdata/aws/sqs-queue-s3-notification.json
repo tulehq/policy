@@ -1,0 +1,25 @@
+{
+    "Version":"2012-10-17",
+    "Id": "example-ID",
+    "Statement": [
+        {
+            "Sid": "example-statement-ID",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "s3.amazonaws.com"
+            },
+            "Action": [
+                "SQS:SendMessage"
+            ],
+            "Resource": "arn:aws:sqs:us-east-1:111122223333:queue-name",
+            "Condition": {
+                "ArnLike": {
+                    "aws:SourceArn": "arn:aws:s3:*:*:amzn-s3-demo-bucket"
+                },
+                "StringEquals": {
+                    "aws:SourceAccount": "123456789012"
+                }
+            }
+        }
+    ]
+}

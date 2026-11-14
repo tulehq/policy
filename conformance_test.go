@@ -342,9 +342,21 @@ func TestConformanceGrammar(t *testing.T) {
 			t.Fatalf("no testdata/aws files (%v)", err)
 		}
 		for _, f := range files {
-			cfLoad(t, path.Base(f))
+			if name := path.Base(f); cfResourceOnly[name] {
+				rpLoad(t, name, policy.ParseResource)
+			} else {
+				cfLoad(t, name)
+			}
 		}
 	})
+}
+
+// cfResourceOnly are the AWS examples that only ParseResource accepts: their
+// published Sids hold characters that IAM refuses outside resource-based
+// policies.
+var cfResourceOnly = map[string]bool{
+	"sns-topic-s3-notification.json": true,
+	"sqs-queue-s3-notification.json": true,
 }
 
 // cfMalformed gives, for each file in testdata/malformed, the rule it breaks.

@@ -216,6 +216,17 @@ func FuzzParseResource(f *testing.F) {
 				checkNoBetter(t, "Authorize", before.Decision, after.Decision)
 			}
 		}
+		// And a request made by a service principal.
+		sreq := ServiceRequest{
+			Action: "s3:GetObject", Resource: "arn:aws:s3:::b/k", Service: "s3.amazonaws.com",
+			Context: ctx("aws:SourceArn", "arn:aws:s3:::src"),
+		}
+		before := AuthorizeService(sreq, p)
+		checkServiceAuthorization(t, before)
+		sreq.Unknown = append([]string{"aws:SourceArn"}, fuzzUnknown...)
+		after := AuthorizeService(sreq, p)
+		checkServiceAuthorization(t, after)
+		checkNoBetter(t, "AuthorizeService", before.Decision, after.Decision)
 	})
 }
 
@@ -342,4 +353,79 @@ func allowedBy(a Authorization, same bool) bool {
 		return id || res && a.Direct
 	}
 	return id && res
+}
+
+// fuzzServiceDocs are resource-based policies whose statements name a
+// service principal in every way a Principal or NotPrincipal can, or not
+// at all. Only the last names no service.
+var fuzzServiceDocs = []string{
+	resourceDoc("Allow", `"Principal":"*"`, bucketObjects),
+	resourceDoc("Allow", `"Principal":{"AWS":"*"}`, bucketObjects),
+	resourceDoc(
+		"Allow",
+		`"Principal":{"Service":["s3.amazonaws.com","sns.amazonaws.com"]}`,
+		bucketObjects+
+			`,"Condition":{"ArnLike":{"aws:SourceArn":"arn:aws:s3:::src*"}}`,
+	),
+	resourceDoc("Deny", `"NotPrincipal":{"Service":"s3.amazonaws.com"}`,
+		`,"Resource":"arn:aws:s3:::b/private/*"`),
+	resourceDoc("Deny", `"Principal":"*"`, bucketObjects+
+		`,"Condition":{"StringNotEqualsIfExists":{"aws:PrincipalServiceName":"s3.amazonaws.com"}}`),
+	resourceDoc("Allow", `"Principal":{"AWS":"`+acct+`"}`, bucketObjects),
+}
+
+// FuzzAuthorizeService authorizes arbitrary service principals and
+// requests against resource-based policies and checks the decision's
+// invariants.
+func FuzzAuthorizeService(f *testing.F) {
+	for i := range fuzzServiceDocs {
+		f.Add("s3.amazonaws.com", "s3:GetObject", "arn:aws:s3:::b/k", uint8(i), "aws:SourceArn")
+	}
+	f.Add(
+		"sns.amazonaws.com",
+		"s3:GetObject",
+		"arn:aws:s3:::b/private/k",
+		uint8(3),
+		"aws:PrincipalServiceName",
+	)
+	f.Add("", "s3:GetObject", "arn:aws:s3:::b/k", uint8(0), "")
+	f.Add("arn:aws:iam::111122223333:root", "s3:GetObject", "arn:aws:s3:::b/k", uint8(5), "")
+	f.Fuzz(func(t *testing.T, service, action, resource string, doc uint8, unknown string) {
+		n := int(doc) % len(fuzzServiceDocs)
+		rp := mustParseResource(t, fuzzServiceDocs[n])
+		req := ServiceRequest{
+			Action: action, Resource: resource, Service: service,
+			Context: ctx("aws:SourceArn", "arn:aws:s3:::src"),
+		}
+		got := AuthorizeService(req, rp)
+		checkServiceAuthorization(t, got)
+		if !validPrincipalID("Service", service, true) || n == 5 {
+			// An invalid service and an account grant never allow a
+			// service.
+			if got.Decision != ImplicitDeny || got.Resource.Policy != -1 {
+				t.Fatalf("service %q got %+v from %s", service, got, fuzzServiceDocs[n])
+			}
+		}
+		req.Unknown = []string{unknown}
+		u := AuthorizeService(req, rp)
+		checkServiceAuthorization(t, u)
+		checkNoBetter(t, "AuthorizeService", got.Decision, u.Decision)
+	})
+}
+
+// checkServiceAuthorization checks the invariants of one AuthorizeService
+// result: Identity is the empty ImplicitDeny, and the reason, Direct and
+// Resource agree with the decision.
+func checkServiceAuthorization(t *testing.T, a Authorization) {
+	t.Helper()
+	none := Result{Decision: ImplicitDeny, Policy: -1}
+	want := map[Decision]Reason{
+		Allow:        NoReason,
+		ExplicitDeny: ResourceDeny,
+		ImplicitDeny: NoResourceAllow,
+	}
+	if a.Identity != none || a.Reason != want[a.Decision] || a.Direct != (a.Decision == Allow) ||
+		a.Resource.Decision != a.Decision || (a.Decision == ImplicitDeny) != (a.Resource.Policy == -1) {
+		t.Fatalf("inconsistent AuthorizeService result: %+v", a)
+	}
 }
