@@ -1,0 +1,20 @@
+{
+  "Version":"2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyNotCodeBuildAccess",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::BUCKETNAME",
+        "arn:aws:s3:::BUCKETNAME/*"
+      ],
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "aws:PrincipalServiceName": "codebuild.amazonaws.com"
+        }
+      }
+    }
+  ]
+}

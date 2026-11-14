@@ -5,11 +5,30 @@ against them with the logic AWS applies, for the Tule services that stand in
 for AWS ones: identity-based policies within one account (`Evaluate`), role
 trust policies for AssumeRole (`TrustMatch`), and identity-based and
 resource-based policies together, within one account and across accounts
-(`Authorize`).
+(`Authorize`), and resource-based policies for requests made by AWS service
+principals (`AuthorizeService`).
 
 It depends on the standard library only, and has no Tule types. Every rule
 below is taken from the IAM User Guide and cited, with the page, in a
 comment where it is implemented.
+
+## Changes in v0.4.0
+
+- New: `ServiceRequest` and `AuthorizeService`, for requests made by an AWS
+  service principal, such as `secretsmanager.amazonaws.com` invoking a
+  rotation function, against the resource's resource-based policy alone.
+  See "Service principals" below.
+- **Behavior change in `Authorize`:** `aws:PrincipalIsAWSService` is now
+  `false` for every `Caller`, and `aws:PrincipalServiceName` and
+  `aws:PrincipalServiceNamesList` are absent, whatever `Context` gives them.
+  Before, `Context` could set them, so a caller passing
+  `aws:PrincipalIsAWSService: ["true"]` met an Allow gated on it, and
+  without them in `Context` the first key was absent rather than `false`,
+  so a `Bool` Deny on `false` did not apply. AWS sets the first "for all
+  signed API requests that use AWS credentials" and to `true` only for a
+  service principal's direct request, and the other two are "not present
+  in any other situation" (`reference_policies_condition-keys.html`).
+  Every other decision is unchanged.
 
 ## Changes in v0.3.0
 
@@ -91,6 +110,15 @@ if az.Decision != policy.Allow {
 	// AccessDenied: "User: <arn> is not authorized to perform: <action> on
 	// resource: <arn> " + az.Reason.Message(action)
 }
+
+// Secrets Manager invoking a rotation function: the function policy alone
+// decides.
+sa := policy.AuthorizeService(policy.ServiceRequest{
+	Action:   "lambda:InvokeFunction",
+	Resource: functionARN,
+	Service:  "secretsmanager.amazonaws.com",
+	Context:  map[string][]string{"aws:SourceArn": {secretARN}, "aws:SourceAccount": {account}},
+}, functionPolicy) // functionPolicy may be nil
 ```
 
 ## API
@@ -182,6 +210,16 @@ if az.Decision != policy.Allow {
   an explicit deny in a resource-based policy`, `because no identity-based
   policy allows the <action> action`, `because no resource-based policy
   allows the <action> action` (`troubleshoot_access-denied.html`).
+- `ServiceRequest{Action, Resource, Service string; Context
+  map[string][]string; Unknown []string}`. `Service` is the service
+  principal making the request, such as `secretsmanager.amazonaws.com`;
+  `Context` carries keys such as `aws:SourceArn` and `aws:SourceAccount`;
+  `Unknown` is as in `Request`.
+- `AuthorizeService(req ServiceRequest, resource *Policy) Authorization`
+  decides a service principal's request against the resource's
+  resource-based policy alone (nil when it has none). `Reason` is
+  `ResourceDeny` or `NoResourceAllow` for a deny; `Identity` is always
+  `ImplicitDeny` with `Policy` -1; `Direct` is true for an Allow.
 - `ParseError{Message string}`, returned by the parsers as `*ParseError`.
 
 ## Semantics and sources
@@ -495,7 +533,8 @@ never applies, and the identity side never applies a statement with a
   `reference_identifiers.html`). The format accepted at parse, upper-case
   letters and digits, 16 to 128 characters (the IAM API's `UserId` and
   `RoleId` lengths), is this package's choice.
-- Service, CanonicalUser and federated-user values match no caller.
+- Service, CanonicalUser and federated-user values match no caller
+  (`AuthorizeService` matches Service values; see "Service principals").
 - **A session whose role was deleted** is refused before matching (see
   above). Matching keeps the rule tule.dev/sigv4 v0.4.1 states for
   `Principal.PrincipalARN` as a second guard: nothing that names the role
@@ -530,7 +569,68 @@ and a session ARN, denies that user or session.
 replace any value `Context` gives them. `aws:username` is absent for other
 callers ("present for IAM users only"; `reference_policies_variables.html`).
 That is this package's choice, so that a caller's identity keys cannot be
-set through the request context. `aws:PrincipalTag/*` and every other key
+set through the request context. `aws:PrincipalIsAWSService` is `false`
+and `aws:PrincipalServiceName` and `aws:PrincipalServiceNamesList` are
+absent for every `Caller`, whatever `Context` gives them: AWS sets the
+first "for all signed API requests that use AWS credentials", `true` only
+"when a service uses a service principal to perform a direct action on
+your resources", and the other two are present only "when the call is made
+by an AWS service principal" (`reference_policies_condition-keys.html`).
+`aws:PrincipalTag/*` and every other key come from `Context` only.
+
+**Service principals** (`reference_policies_elements_principal.html`,
+`reference_policies_elements_notprincipal.html`,
+`reference_policies_condition-keys.html`). `AuthorizeService` decides a
+request made by a service principal against the resource-based policy
+alone: a Deny that applies denies (`ResourceDeny`), else an Allow that
+applies allows (`Direct` true), else `NoResourceAllow`. A statement applies
+as in `Authorize`, with its `Principal` naming the service or its
+`NotPrincipal` not exempting it:
+
+- A `Service` value equal to `Service` names it, compared exactly, so the
+  regional `s3.ap-east-1.amazonaws.com` is another principal than
+  `s3.amazonaws.com` ("You must use the regionalized service principal
+  name when an AWS service in an opt-in Region makes a request to another
+  Region.").
+- `"*"` and `{"AWS":"*"}` name it, in an Allow as in a Deny. The SNS
+  Developer Guide gives a queue policy with `"Principal": "*"` and an
+  `aws:SourceArn` condition as "an example policy statement that allows the
+  Amazon SNS topic to send a message to the Amazon SQS queue"
+  (`sns-send-message-to-sqs-cross-account.html`), and lets CloudWatch
+  alarms publish through `{"AWS":"*"}` with `aws:SourceArn`
+  (`sns-access-policy-use-cases.html`). S3's `RestrictPublicBuckets`
+  "restricts access to an access point or bucket with a public policy to
+  only AWS service principals and authorized users within the bucket
+  owner's account" (`access-control-block-public-access.html`). For a
+  Deny, the NotPrincipal page uses `"Principal": "*"` "to prevent all
+  service principals, except those specified in the Condition element".
+- Under `NotPrincipal`, a matching `Service` value, `"*"` or `{"AWS":"*"}`
+  exempts the service, as `"*"` exempts every caller in `Authorize`.
+- AWS, CanonicalUser and Federated values never name a service.
+
+A `Service` that is not a valid `Service` value (the rule `ParseResource`
+applies: a dotted name, not an ARN, without wildcards) is refused with
+`ImplicitDeny` and `NoResourceAllow`, and so is a nil policy.
+
+The keys that come from the principal replace any value `Context` gives
+them: `aws:PrincipalServiceName` is `Service` and
+`aws:PrincipalIsAWSService` is `true` ("set to true when a service uses a
+service principal to perform a direct action on your resources").
+`aws:username`, `aws:PrincipalOrgID`, `aws:PrincipalOrgPaths` and every
+`aws:PrincipalTag/` key are absent: AWS includes them only for IAM users,
+for members of an organization, and for tagged users and roles.
+`aws:PrincipalArn` ("all signed requests"), `aws:PrincipalAccount`,
+`aws:PrincipalType` and `aws:userid` ("all requests, including anonymous
+requests") are documented as present, but no value for a service
+principal is given, so they are unknown (see "Unknown context keys"):
+a condition on one never helps an Allow apply and always helps a Deny
+apply. That is this package's choice. `aws:PrincipalServiceNamesList`
+"contains an unordered list of all service principal names associated with
+the Regional instance of the service"; `Service` alone does not give that
+list (the Principal page shows one service under a regional and a
+non-regional name) and AWS lists no example value, so it comes from
+`Context`, and a caller that cannot tell its values passes it in `Unknown`.
+`aws:SourceArn`, `aws:SourceAccount`, `aws:SourceOrgID` and every other key
 come from `Context` only.
 
 **Matching cost.** Wildcard patterns are matched by simulating the pattern
@@ -590,12 +690,14 @@ text for those faults is not documented.
   services do it through identity's `principals` client. A session whose
   role was deleted is refused by `Authorize` whatever the policy names.
 - This library supplies no condition keys of its own beyond those it takes
-  from the `Caller`: `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`, like
-  every other key, come from the caller's `Context`, and a caller that
-  cannot tell their values passes them in `Unknown`.
-- Service principals never match a Tule caller, and neither do
-  CanonicalUser or federated-user values; S3 ACL grantees are not
-  evaluated.
+  from the `Caller` or the service principal (see "Request context in
+  `Authorize`" and "Service principals"): in `Authorize`,
+  `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths`, like every other key,
+  come from the caller's `Context`, and a caller that cannot tell their
+  values passes them in `Unknown`.
+- Service principals never match a `Caller` in `Authorize`; requests made
+  by a service principal go to `AuthorizeService`. CanonicalUser and
+  federated-user values match nothing; S3 ACL grantees are not evaluated.
 - Some services require an explicit resource-based Allow within one
   account ("Resource-based policies for services other than IAM and AWS KMS
   may also require an explicit Allow statement within the same account";
@@ -656,7 +758,7 @@ make lint   # golangci-lint, v2.15.0 in CI
 make test   # go test -race ./...
 go test -run '^$' -fuzz '^FuzzParse$' -fuzztime 30s
 # also FuzzGlob, FuzzEvaluate, FuzzJunkNeverGrants, FuzzParseResource,
-# FuzzAuthorize and FuzzConformanceParse
+# FuzzAuthorize, FuzzAuthorizeService and FuzzConformanceParse
 ```
 
 ## License

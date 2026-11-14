@@ -244,7 +244,9 @@ func Authorize(req AuthorizeRequest, resource *Policy, identity ...*Policy) Auth
 	if req.Caller.Type == PrincipalTypeAccount && id.Decision == ImplicitDeny {
 		id = Result{Decision: Allow, Policy: -1}
 	}
-	res, direct := evaluateResource(req.Action, req.Resource, req.Caller, rc, resource)
+	res, direct := evaluateResource(resource, func(s *statement, vars bool) (matchKind, bool) {
+		return s.grants(req.Action, req.Resource, req.Caller, vars, rc)
+	})
 	out := Authorization{Identity: id, Resource: res, Direct: direct}
 	out.Decision, out.Reason = decide(id.Decision, res.Decision, direct,
 		isAccountID(req.Caller.AccountID) && req.Caller.AccountID == req.ResourceAccount)
@@ -297,6 +299,17 @@ func decideAllow(idAllow, resAllow, direct, same bool) (Decision, Reason) {
 // name, the last element of its ARN, and is absent for other callers ("IAM
 // policy elements: Variables and tags"). An empty value makes its key
 // absent, and an absent key is never derived from c.ARN.
+//
+// The service principal keys are fixed too, whatever ctx gives them ("AWS
+// global condition context keys"): aws:PrincipalIsAWSService is "false",
+// since it "is present in the request context for all signed API requests
+// that use AWS credentials" and is "true" only "when a service uses a
+// service principal to perform a direct action on your resources"; it is
+// "false if the service uses the credentials of an IAM principal" or "a
+// service role or service-linked role", and a Caller is the root user, an
+// IAM user or a role session. aws:PrincipalServiceName and aws:PrincipalServiceNamesList
+// are absent: each "is present in the request when the call is made by an
+// AWS service principal. This key is not present in any other situation".
 func callerContext(c Caller, ctx map[string][]string) *requestContext {
 	rc := newRequestContext(c.ARN, ctx)
 	username := ""
@@ -304,11 +317,14 @@ func callerContext(c Caller, ctx map[string][]string) *requestContext {
 		username = c.ARN[strings.LastIndexByte(c.ARN, '/')+1:]
 	}
 	for key, v := range map[string]string{
-		"aws:principalarn":     c.PrincipalARN,
-		"aws:principalaccount": c.AccountID,
-		"aws:userid":           c.UserID,
-		"aws:principaltype":    string(c.Type),
-		"aws:username":         username,
+		"aws:principalarn":              c.PrincipalARN,
+		"aws:principalaccount":          c.AccountID,
+		"aws:userid":                    c.UserID,
+		"aws:principaltype":             string(c.Type),
+		"aws:username":                  username,
+		"aws:principalisawsservice":     "false",
+		"aws:principalservicename":      "",
+		"aws:principalservicenameslist": "",
 	} {
 		if v == "" {
 			// Present with no values: absent, and not derived (see get).
@@ -320,21 +336,20 @@ func callerContext(c Caller, ctx map[string][]string) *requestContext {
 	return rc
 }
 
-// evaluateResource decides the resource-based policy p for caller: the
-// first Deny that applies, else the first direct Allow, else the first
-// Allow, and whether that Allow is direct. A nil p decides ImplicitDeny.
+// evaluateResource decides the resource-based policy p for one principal,
+// whose statements grants reports on (given p's vars): the first Deny that
+// applies, else the first direct Allow, else the first Allow, and whether
+// that Allow is direct. A nil p decides ImplicitDeny.
 func evaluateResource(
-	action, resource string,
-	caller Caller,
-	rc *requestContext,
 	p *Policy,
+	grants func(s *statement, vars bool) (matchKind, bool),
 ) (Result, bool) {
 	res, direct := Result{Decision: ImplicitDeny, Policy: -1}, false
 	if p == nil {
 		return res, false
 	}
 	for _, s := range p.statements {
-		kind, applies := s.grants(action, resource, caller, p.vars, rc)
+		kind, applies := grants(&s, p.vars)
 		if !applies {
 			continue
 		}
@@ -406,7 +421,9 @@ func (s *statement) grants(
 //     ID) matches an orphaned session, whose role no longer exists.
 //   - Service, CanonicalUser and Federated values, federated-user session
 //     ARNs and other ARNs match no caller: no Caller is a service, a
-//     canonical user or a federated user.
+//     canonical user or a federated user. A request made by a service
+//     principal is AuthorizeService's, which matches Service values (see
+//     principals.serviceMatch).
 func (p *principals) callerMatch(c Caller) matchKind {
 	if p.all {
 		return matchDirect
